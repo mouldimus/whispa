@@ -45,6 +45,8 @@ class TrayIcon:
         on_quit: Callable[[], None],
         on_fix_last: Callable[[], None] | None = None,
         learned_stats: Callable[[], dict] | None = None,
+        on_open_console: Callable[[], None] | None = None,
+        autostart=None,
     ) -> None:
         self.hotkey = hotkey
         self.model = model
@@ -52,6 +54,8 @@ class TrayIcon:
         self.on_quit = on_quit
         self.on_fix_last = on_fix_last
         self.learned_stats = learned_stats
+        self.on_open_console = on_open_console
+        self.autostart = autostart
         self._icon = None
         self._status = "ready"
 
@@ -85,11 +89,53 @@ class TrayIcon:
             items.append(
                 pystray.MenuItem("Fix last dictation...", self._fix_last, default=True)
             )
-            items.append(pystray.Menu.SEPARATOR)
+        settings = self._settings_menu(pystray)
+        if settings is not None:
+            items.append(pystray.MenuItem("Settings", settings))
+        items.append(pystray.Menu.SEPARATOR)
         items.append(pystray.MenuItem("Quit", self._quit))
         return pystray.Icon(
             "whispa", _make_image(State.IDLE), "whispa - ready", pystray.Menu(*items)
         )
+
+    def _settings_menu(self, pystray):
+        entries = []
+        if self.on_open_console is not None:
+            entries.append(
+                pystray.MenuItem("Open debug console...", self._open_console)
+            )
+        if self.autostart is not None and self.autostart.available:
+            entries.append(
+                pystray.MenuItem(
+                    "Start with Windows",
+                    self._toggle_autostart,
+                    checked=lambda _item: self._autostart_checked(),
+                )
+            )
+        return pystray.Menu(*entries) if entries else None
+
+    def _autostart_checked(self) -> bool:
+        try:
+            return self.autostart.is_enabled()
+        except Exception:
+            log.debug("could not read the autostart setting", exc_info=True)
+            return False
+
+    def _toggle_autostart(self, _icon=None, _item=None) -> None:
+        try:
+            now_on = self.autostart.toggle()
+            self._status = "starts with Windows" if now_on else "manual start"
+            if self._icon is not None:
+                self._icon.update_menu()
+        except Exception:
+            log.exception("could not change the autostart setting")
+
+    def _open_console(self, _icon=None, _item=None) -> None:
+        if self.on_open_console is not None:
+            try:
+                self.on_open_console()
+            except Exception:
+                log.exception("could not open the debug console")
 
     def _fix_last(self, _icon=None, _item=None) -> None:
         if self.on_fix_last is not None:

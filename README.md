@@ -12,17 +12,25 @@ getting that word wrong.
 
 ## Install (Windows)
 
-1. Install **Python 3.11 or newer** from [python.org](https://www.python.org/downloads/windows/) —
-   tick **"Add Python to PATH"** during setup.
-2. Copy this `whispa` folder somewhere permanent, e.g. `C:\Tools\whispa`.
-3. Double-click **`install.bat`**. It builds a virtual environment and pulls in
-   the dependencies (~200 MB, once).
-4. Double-click **`whispa.bat`**. No console window appears — it goes straight
-   to the system tray. The on-screen pill shows `loading base.en` while the
-   model downloads (~150 MB, first run only), then `ready`.
+1. Copy this `whispa` folder somewhere permanent, e.g. `C:\Tools\whispa`.
+2. Double-click **`install.bat`**.
+3. Double-click **`whispa.bat`**.
 
-To start it at login, put a shortcut to `whispa-silent.vbs` in the folder that
-opens when you run `shell:startup` in the Windows Run box.
+That's it — **you do not need to install Python first.** If `install.bat` can't
+find Python 3.11 or newer it offers to install Python 3.12 for you, using
+`winget` if available and the official python.org installer otherwise. It
+installs per-user, so no administrator rights are needed. Then it builds the
+virtual environment and pulls in the dependencies (~200 MB, once).
+
+If Python was just installed, the setup window may need to be closed and
+`install.bat` run once more — a fresh window is needed to pick up the new PATH.
+It tells you if so.
+
+`whispa.bat` opens no console window; it goes straight to the system tray. The
+on-screen pill shows `loading base.en` while the model downloads (~150 MB,
+first run only), then `ready`.
+
+To have it running from login, use the tray's **Settings → Start with Windows**.
 
 ---
 
@@ -55,7 +63,29 @@ The bars are computed from the real input signal, so they answer "is it
 actually picking me up?" rather than just animating reassuringly.
 
 The tray icon mirrors the same states, and its menu has **Fix last
-dictation...**, the model in use, and how much has been learnt.
+dictation...**, the model in use, how much has been learnt, and a **Settings**
+submenu.
+
+### Settings (tray menu)
+
+**Open debug console...** — a window showing whispa's log. It opens with the
+history already in it, not just whatever happens next, because by the time you
+notice a problem the interesting lines have usually already gone by. It
+follows new lines live, colours warnings and errors, and has a *Copy all*
+button for when you want to paste the log somewhere. The file it mirrors is
+`%APPDATA%\whispa\whispa.log`.
+
+**Start with Windows** — a checkbox. On, whispa starts at login; off, it
+doesn't. It writes a single value to your own `HKCU\...\CurrentVersion\Run`
+key, so it needs no admin rights and turning it off removes it completely. If
+you move the whispa folder later, it notices the entry points at the old place
+and re-points it on next start rather than quietly failing every morning.
+
+Both are also available without the tray:
+
+```
+whispa-console.bat --autostart on      (or off, or status)
+```
 
 ---
 
@@ -208,6 +238,8 @@ because tkinter insists; the tray runs detached.
 | `whispa/observe.py` | Reads the focused control back to spot your edits |
 | `whispa/learn.py` | Turns edits into corrections and vocabulary |
 | `whispa/app.py` | State machine tying it together |
+| `whispa/autostart.py` | The "Start with Windows" registry toggle |
+| `whispa/console.py` | Log ring buffer and the debug console window |
 | `whispa/overlay.py` | The on-screen pill |
 | `whispa/dialog.py` | "Fix last dictation" dialog |
 | `whispa/tray.py` | Tray icon |
@@ -226,15 +258,20 @@ no Windows, so it is worth being precise about which claims are backed by a run.
 - **The whole learning loop against real model output**: real transcript → a
   user edit → correction learnt → *re-transcribed the same real audio and
   confirmed the learnt fix was applied.*
-- 108 unit tests. Hotkey matching including every hybrid tap/hold/latch
+- 129 unit tests. Hotkey matching including every hybrid tap/hold/latch
   transition with a fake clock; correction extraction and its refusal to learn
   from rewrites; span location under edits elsewhere in the document and in a
   30,000-character document; learner persistence, conflicts and thresholds;
   level-meter mapping (silence really does read as silence); indicator
   visibility rules; injector clipboard restore and held-modifier waiting;
-  engine edge cases; corrupt-config fallback.
+  engine edge cases; corrupt-config fallback; the autostart toggle including
+  stale-entry detection and repair after the folder moves; and the log ring
+  buffer, including that a reader which falls behind never repeats or skips
+  lines as old ones are evicted.
 - Model speed figures in the table above.
-- CLI: `--help`, `--write-config`, invalid config handling.
+- CLI: `--help`, `--write-config`, `--autostart`, invalid config handling.
+- That the Python installer URLs `install.bat` builds for x64, ARM64 and x86
+  all resolve, and that every branch in the script has a defined target.
 
 **Not verifiable from here — worth an eye on your PC:**
 - The global hotkey firing system-wide, and hybrid tap/hold feel in practice.
@@ -244,6 +281,11 @@ no Windows, so it is worth being precise about which claims are backed by a run.
   logic is tested; their pixels are not.
 - UI Automation read-back in the specific apps you use.
 - Microphone capture through `sounddevice` on real hardware.
+- **`install.bat` has never been executed** — there is no Windows here. Its
+  logic and its download URLs were checked, but the Python bootstrap itself is
+  unproven until you run it on a PC without Python.
+- Writing to the real Windows registry. The autostart logic is tested against
+  an in-memory stand-in; `winreg` itself is not exercised here.
 
 Run the tests yourself:
 

@@ -57,11 +57,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--console", action="store_true", help="also log to stdout")
     p.add_argument("--list-devices", action="store_true", help="list microphones, exit")
     p.add_argument("--write-config", action="store_true", help="write defaults, exit")
+    p.add_argument(
+        "--autostart",
+        choices=["on", "off", "status"],
+        help="start whispa when Windows starts (also in the tray's Settings menu)",
+    )
     p.add_argument("--verbose", "-v", action="store_true")
     return p
 
 
-def setup_logging(cfg: Config, args: argparse.Namespace) -> None:
+def setup_logging(cfg: Config, args: argparse.Namespace):
+    """Configure logging and return the in-memory buffer the tray console reads.
+
+    The buffer is installed first and always, so that the debug console can
+    show what happened *before* it was opened - which is the only history that
+    matters when something has already gone wrong.
+    """
     level = logging.DEBUG if args.verbose else getattr(
         logging, cfg.log_level.upper(), logging.INFO
     )
@@ -70,6 +81,12 @@ def setup_logging(cfg: Config, args: argparse.Namespace) -> None:
     fmt = logging.Formatter(
         "%(asctime)s %(levelname)-7s %(name)s: %(message)s", "%H:%M:%S"
     )
+
+    from .console import RingBufferHandler
+
+    buffer = RingBufferHandler()
+    buffer.setFormatter(fmt)
+    root.addHandler(buffer)
     # Console handlers are pointless under pythonw and can even raise when
     # stdout is not a real stream, so they are opt-in.
     if args.console or args.list_devices or args.write_config:
@@ -88,6 +105,7 @@ def setup_logging(cfg: Config, args: argparse.Namespace) -> None:
             root.addHandler(handler)
         except Exception:
             pass
+    return buffer
 
 
 def apply_overrides(cfg: Config, args: argparse.Namespace) -> Config:
@@ -122,9 +140,32 @@ def main(argv: list[str] | None = None) -> int:
 
     cfg, load_problem = Config.load_checked(args.config)
     cfg = apply_overrides(cfg, args)
-    setup_logging(cfg, args)
+    log_buffer = setup_logging(cfg, args)
     if load_problem:
         log.error("%s", load_problem)
+
+    from .autostart import AutostartManager
+
+    autostart = AutostartManager()
+
+    if args.autostart:
+        if not autostart.available:
+            print("autostart is only supported on Windows", file=sys.stderr)
+            return 5
+        if args.autostart == "on":
+            ok = autostart.enable()
+            print("autostart enabled" if ok else "could not enable autostart")
+            return 0 if ok else 5
+        if args.autostart == "off":
+            ok = autostart.disable()
+            print("autostart disabled" if ok else "could not disable autostart")
+            return 0 if ok else 5
+        enabled = autostart.is_enabled()
+        print(f"autostart: {'on' if enabled else 'off'}")
+        if enabled and autostart.is_stale():
+            print("  (points at a different folder; it will be repaired on next start)")
+        print(f"  command: {autostart.command}")
+        return 0
 
     if args.list_devices:
         from .audio import list_input_devices
@@ -226,6 +267,24 @@ def main(argv: list[str] | None = None) -> int:
         if overlay is not None:
             overlay.stop()
 
+    log_window_ref: list = [None]
+
+    def open_console() -> None:
+        """Open the debug console on the tkinter thread."""
+        if overlay is None:
+            log.warning("the debug console needs the on-screen indicator enabled")
+            return
+        from .console import LogWindow
+
+        def _open():
+            if log_window_ref[0] is None:
+                log_window_ref[0] = LogWindow(
+                    log_buffer, log_path=default_config_dir() / "whispa.log"
+                )
+            log_window_ref[0].open(parent=overlay._root)
+
+        overlay.call_soon(_open)
+
     def fix_last() -> None:
         """Open the correction dialog on the tkinter thread."""
         if overlay is None or not engine.last_injected:
@@ -252,6 +311,8 @@ def main(argv: list[str] | None = None) -> int:
                 on_quit=quit_everything,
                 on_fix_last=fix_last if overlay is not None else None,
                 learned_stats=lambda: learner.stats,
+                on_open_console=open_console if overlay is not None else None,
+                autostart=autostart,
             )
             tray_ref[0] = tray
         except Exception:
@@ -293,6 +354,12 @@ def main(argv: list[str] | None = None) -> int:
             if overlay is not None:
                 overlay.set_state(State.ERROR, f"hotkey failed: {exc}", force=True)
             return
+        # If the folder has been moved, the Run entry points somewhere stale;
+        # fix it now rather than failing silently at next login.
+        try:
+            autostart.repair_if_stale()
+        except Exception:
+            log.debug("autostart repair check failed", exc_info=True)
         learning = "on" if (watcher and watcher.available) else "manual"
         log.info(
             "ready: %s (%s), learning %s", cfg.hotkey, cfg.hotkey_mode, learning
@@ -330,6 +397,8 @@ def main(argv: list[str] | None = None) -> int:
         engine.shutdown()
         if tray is not None:
             tray.stop()
+        if log_window_ref[0] is not None:
+            log_window_ref[0].close()
         learner.save()
         log.info("stopped: %s", engine.stats.summary())
         if args.console:
