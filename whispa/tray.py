@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from typing import Callable
 
+from . import __version__
 from .app import State
 from .hotkey import PRESETS, parse_hotkey, preset_label
 
@@ -85,7 +86,9 @@ class TrayIcon:
         items = [
             pystray.MenuItem(lambda _: f"Status: {self._status}", None, enabled=False),
             pystray.MenuItem(self._usage_hint, None, enabled=False),
-            pystray.MenuItem(f"Model: {self.model}", None, enabled=False),
+            pystray.MenuItem(
+                f"Model: {self.model}   (whispa {__version__})", None, enabled=False
+            ),
             pystray.MenuItem(self._learned_label, None, enabled=False),
             pystray.Menu.SEPARATOR,
         ]

@@ -16,6 +16,7 @@ import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
+from . import __version__
 from .app import DictationEngine, State
 from .config import Config, default_config_dir
 from .format import make_formatter
@@ -74,6 +75,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="start whispa when Windows starts (also in the tray's Settings menu)",
     )
     p.add_argument("--verbose", "-v", action="store_true")
+    p.add_argument(
+        "--version", action="version", version=f"whispa {__version__}"
+    )
     return p
 
 
@@ -155,6 +159,7 @@ def main(argv: list[str] | None = None) -> int:
     cfg, load_problem = Config.load_checked(args.config)
     cfg = apply_overrides(cfg, args)
     log_buffer = setup_logging(cfg, args)
+    log.info("whispa %s starting from %s", __version__, Path(__file__).parent)
     if load_problem:
         log.error("%s", load_problem)
 
