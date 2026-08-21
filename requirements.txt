@@ -1,0 +1,16 @@
+# Core: local speech-to-text. No API keys, no network after the first run.
+faster-whisper>=1.1.0
+numpy>=1.24
+
+# Microphone capture.
+sounddevice>=0.4.6
+
+# Global hotkey + synthesised keystrokes.
+pynput>=1.7.6
+
+# Clipboard, for the default "paste" injection method.
+pyperclip>=1.8.2
+
+# System-tray icon. Drop these two if you always run with --no-tray.
+pystray>=0.19.5
+pillow>=10.0.0

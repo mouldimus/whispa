@@ -1,0 +1,6 @@
+.venv/
+.venv-verify/
+__pycache__/
+*.pyc
+tests/data/*.flac
+config.json
