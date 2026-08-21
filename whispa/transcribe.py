@@ -9,11 +9,19 @@ from __future__ import annotations
 import logging
 import re
 import time
+from dataclasses import replace
 from typing import Protocol
 
 import numpy as np
 
+from .audio import speech_spans
+from .format import Segment, join_segments
+
 log = logging.getLogger(__name__)
+
+# Each slice of a paused recording is decoded with this much extra audio either
+# side, so that a word starting right on the boundary is not cut in half.
+SLICE_PAD_SECONDS = 0.15
 
 
 class Transcriber(Protocol):
@@ -50,6 +58,7 @@ class WhisperTranscriber:
         vad_filter: bool = True,
         initial_prompt: str = "",
         sample_rate: int = 16000,
+        paragraph_pause_seconds: float = 2.0,
     ) -> None:
         self.model_name = model
         self.device = device
@@ -60,6 +69,9 @@ class WhisperTranscriber:
         self.vad_filter = vad_filter
         self.initial_prompt = initial_prompt or None
         self.sample_rate = sample_rate
+        # A silence this long between two segments is a paragraph break; 0
+        # turns pause-based paragraphing off.
+        self.paragraph_pause_seconds = paragraph_pause_seconds
         self._model = None
 
     @property
@@ -89,14 +101,8 @@ class WhisperTranscriber:
             self.transcribe(silence)
         except Exception:  # pragma: no cover - warmup must never be fatal
             log.debug("warmup transcription failed", exc_info=True)
-
-    def transcribe(self, audio: np.ndarray) -> str:
-        if audio is None or len(audio) == 0:
-            return ""
-        self.load()
+    def _decode(self, audio: np.ndarray, words: bool = False):
         assert self._model is not None
-
-        t0 = time.monotonic()
         segments, _info = self._model.transcribe(
             audio,
             language=self.language,
@@ -104,9 +110,108 @@ class WhisperTranscriber:
             vad_filter=self.vad_filter,
             initial_prompt=self.initial_prompt,
             condition_on_previous_text=False,
+            word_timestamps=words,
         )
         # `segments` is a generator; consuming it is where decoding happens.
-        text = " ".join(seg.text.strip() for seg in segments).strip()
+        return list(segments)
+
+    @staticmethod
+    def _plain(raw) -> list[Segment]:
+        return [
+            Segment(text=(seg.text or "").strip(), start=seg.start, end=seg.end)
+            for seg in raw
+            if (seg.text or "").strip()
+        ]
+
+    def transcribe_segments(self, audio: np.ndarray) -> list[Segment]:
+        """Decode, and mark where the speaker paused.
+
+        The pauses are found in the waveform, not in whisper's timestamps.
+        Whisper stretches those over silence - a two-second gap comes back as
+        the word before it simply lasting two seconds longer - and its VAD
+        deletes the silence outright, so the transcript on its own carries no
+        trace of where the paragraphs were.
+
+        Decoding the pieces separately would show the pauses, and also makes
+        the transcription measurably worse: a two-second fragment with nothing
+        around it comes back as "ASK NOT!" where the whole recording gives
+        "ask not what your country". So the audio is decoded once, exactly as
+        it always was, and only the *text* is cut - at the words whose timings
+        straddle each silence.
+        """
+        if audio is None or len(audio) == 0:
+            return []
+        self.load()
+        pauses = self._pauses(audio)
+        if not pauses:
+            # No pause to mark, so no need to pay for word timings either.
+            return self._plain(self._decode(audio))
+
+        raw = self._decode(audio, words=True)
+        words = [w for seg in raw for w in (getattr(seg, "words", None) or [])]
+        if not words:
+            # Some builds return no word timings; a run-on transcript beats one
+            # chopped in the wrong places.
+            log.debug("no word timings available; paragraphs not marked")
+            return self._plain(raw)
+        return self._split_at_pauses(words, pauses)
+
+    def _pauses(self, audio: np.ndarray) -> list[tuple[float, float]]:
+        """The silences long enough to mean "new paragraph", in seconds."""
+        if self.paragraph_pause_seconds <= 0:
+            return []
+        spans = speech_spans(
+            audio, self.sample_rate, min_silence=self.paragraph_pause_seconds
+        )
+        pauses = [
+            (previous[1] / self.sample_rate, current[0] / self.sample_rate)
+            for previous, current in zip(spans, spans[1:])
+        ]
+        if pauses:
+            log.info(
+                "%d pause(s) in the recording: %s",
+                len(pauses),
+                ", ".join(f"{e - s:.1f}s" for s, e in pauses),
+            )
+        return pauses
+
+    @staticmethod
+    def _split_at_pauses(words, pauses: list[tuple[float, float]]) -> list[Segment]:
+        """Group the words into one Segment per paragraph.
+
+        A word begins a new paragraph if it had not finished when the silence
+        began - which covers both the word whose timing was stretched across
+        the gap and the word that genuinely starts after it.
+        """
+        groups: list[list] = [[]]
+        boundaries: list[tuple[float, float]] = []
+        remaining = list(pauses)
+        for word in words:
+            while remaining and word.end > remaining[0][0] and groups[-1]:
+                boundaries.append(remaining.pop(0))
+                groups.append([])
+            groups[-1].append(word)
+
+        out: list[Segment] = []
+        for index, group in enumerate(groups):
+            text = "".join(w.word for w in group).strip()
+            if not text:
+                continue
+            # Report the silence either side as the bounds, so the gap between
+            # two paragraphs is the length of the real pause rather than
+            # whisper's stretched idea of it.
+            start = boundaries[index - 1][1] if index else group[0].start
+            end = boundaries[index][0] if index < len(boundaries) else group[-1].end
+            out.append(Segment(text=text, start=start, end=end))
+        return out
+
+    def transcribe(self, audio: np.ndarray) -> str:
+        if audio is None or len(audio) == 0:
+            return ""
+        t0 = time.monotonic()
+        text = join_segments(
+            self.transcribe_segments(audio), self.paragraph_pause_seconds
+        ).strip()
         elapsed = time.monotonic() - t0
         audio_seconds = len(audio) / float(self.sample_rate)
         log.info(

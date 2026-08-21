@@ -133,6 +133,67 @@ class MicRecorder:
         return np.concatenate(frames).astype(np.float32, copy=False)
 
 
+def speech_spans(
+    audio: np.ndarray,
+    sample_rate: int,
+    min_silence: float = 1.0,
+    frame_seconds: float = 0.03,
+    floor: float = 0.01,
+    relative: float = 0.06,
+) -> list[tuple[int, int]]:
+    """Find the runs of speech, split wherever the speaker paused.
+
+    Whisper cannot help here: its own timestamps are stretched to cover
+    silence, so a deliberate two-second pause between paragraphs comes back as
+    one unbroken segment with the words either side simply held longer. The
+    pause is only visible in the waveform, which is where this looks for it.
+
+    Returns [(start_sample, end_sample), ...], one per run of speech, with
+    silences shorter than `min_silence` left inside a run. The bounds are the
+    speech itself, unpadded, so the distance between two spans is the length of
+    the real pause; whoever slices the audio adds their own padding. A
+    recording with no long pause gives exactly one span, which is the common
+    case and costs one model call as before.
+    """
+    if audio is None or len(audio) == 0:
+        return []
+    frame = max(1, int(frame_seconds * sample_rate))
+    usable = (len(audio) // frame) * frame
+    if usable < frame:
+        return [(0, len(audio))]
+    frames = np.abs(audio[:usable]).reshape(-1, frame).max(axis=1)
+    # Relative to this recording's own peak, so a quiet mic and a loud one both
+    # work, with an absolute floor so that pure noise is never "speech".
+    threshold = max(floor, relative * float(frames.max()))
+    loud = frames > threshold
+    if not loud.any():
+        return []
+
+    gap_frames = max(1, int(round(min_silence / frame_seconds)))
+    spans: list[tuple[int, int]] = []
+    start: int | None = None
+    quiet = 0
+    for index, is_loud in enumerate(loud):
+        if is_loud:
+            if start is None:
+                start = index
+            quiet = 0
+        elif start is not None:
+            quiet += 1
+            if quiet >= gap_frames:
+                spans.append((start, index - quiet + 1))
+                start = None
+                quiet = 0
+    if start is not None:
+        spans.append((start, len(loud)))
+
+    return [
+        (first * frame, min(len(audio), last * frame))
+        for first, last in spans
+        if last > first
+    ]
+
+
 def duration_seconds(audio: np.ndarray, sample_rate: int) -> float:
     return len(audio) / float(sample_rate) if sample_rate else 0.0
 

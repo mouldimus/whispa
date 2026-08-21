@@ -44,6 +44,51 @@ That is the default `hybrid` mode. A press shorter than 0.35 s is a tap; longer
 is push-to-talk. Set `hotkey_mode` to `hold` or `toggle` if you want only one
 of the two.
 
+The key is not fixed: **tray → Settings → Shortcut** offers `F9`, `F8`, `F4`,
+`Scroll Lock`, `Pause`, `Ctrl + Win (Start)`, `Ctrl + Shift + Space` and
+`Ctrl + Alt + D`. Picking one rebinds it immediately — no restart — and writes
+it to `config.json`. Anything pynput can name works if you would rather type it
+into the config yourself.
+
+### Paragraphs, bullets and formatting
+
+Whisper returns one unbroken line, which is fine for a search box and useless
+for a paragraph of writing. whispa breaks it up three ways:
+
+**Pause where you would break.** Stop speaking for **two seconds** and the next
+sentence starts a new paragraph. This is measured in the waveform, not taken
+from whisper's timestamps — whisper stretches those across silence, so its own
+transcript has no idea where you paused. Tune it with `paragraph_pause_seconds`
+(lower = more paragraphs; below about 1.5 s it starts breaking mid-thought,
+because ordinary rhetorical pauses run 1.0–1.5 s). Set `paragraph_style` to
+`off` in chat apps where a newline sends the message.
+
+**Say what you want.** Spoken as their own phrase, these become structure:
+
+| Say | You get |
+|-----|---------|
+| "new paragraph" / "next paragraph" | a blank line |
+| "new line" / "next line" | a line break |
+| "bullet point" / "new bullet" / "next point" | `- ` and the item |
+| "numbered point" / "next number" | `1. `, `2. `, ... |
+
+So *"shopping. bullet point milk. bullet point bread."* types
+
+```
+Shopping.
+- Milk.
+- Bread.
+```
+
+A command is only obeyed where it cannot be part of a sentence — at the start,
+or straight after a `.` `,` `;` `:` `!` `?` — so "we opened a **new line** of
+business" stays as words. Add your own (or drop one you keep saying by
+accident) with `voice_command_extras`, e.g.
+`{"full stop": ".", "next point": ""}`. `--no-voice-commands` turns the lot off.
+
+**Sentences get capitals**, including the first word of each bullet and
+paragraph. `auto_capitalise: false` if you would rather it didn't.
+
 ### The indicator
 
 A small pill sits near the bottom of the screen and tells you exactly where
@@ -74,6 +119,11 @@ notice a problem the interesting lines have usually already gone by. It
 follows new lines live, colours warnings and errors, and has a *Copy all*
 button for when you want to paste the log somewhere. The file it mirrors is
 `%APPDATA%\whispa\whispa.log`.
+
+**Shortcut** — the eight bindings listed above, as a radio list showing
+which one is live. Changing it takes effect on the next keypress and survives a
+restart. If the shortcut in your `config.json` isn't one of the eight, it stays
+in the list as its own entry, so trying a preset is never a one-way door.
 
 **Start with Windows** — a checkbox. On, whispa starts at login; off, it
 doesn't. It writes a single value to your own `HKCU\...\CurrentVersion\Run`
@@ -127,6 +177,8 @@ whispa-console.bat --help
   --mode hybrid|hold|toggle
   --model base.en          tiny.en, base.en, small.en, medium.en, large-v3
   --inject paste|type|clipboard
+  --paragraphs blank|single|off
+  --no-voice-commands      ignore "new paragraph", "bullet point", ....
   --input-device 3         pick a microphone (see --list-devices)
   --dry-run                transcribe and log, never touch the keyboard
   --no-overlay             hide the on-screen indicator
@@ -145,6 +197,9 @@ Run `whispa-console.bat --write-config` to create the settings file, then edit
 - `model` — accuracy vs speed, see the table below.
 - `inject_method` — `paste` (default, fast, works nearly everywhere),
   `type` (slower, for apps that block programmatic paste), or `clipboard`.
+- `paragraph_style`, `paragraph_pause_seconds`, `voice_commands`,
+  `voice_command_extras`, `auto_capitalise`, `bullet_prefix` — the formatting,
+  described above.
 - `replacements` — hand-written fixes applied to every transcript, e.g.
   `{"gonna": "going to"}`. Learned corrections stack on top of these.
 - `initial_prompt` — a sentence of context that biases spelling. Your jargon
@@ -161,6 +216,16 @@ A chord like `Ctrl+Alt+D` means that when you release it to end the recording,
 `Ctrl+V`. That becomes a modified keystroke and a mystery bug. `F9` has no such
 problem. Chords still work, and injection waits for held modifiers to come up
 first, but a single key is simply more robust.
+
+`Ctrl + Win` has one extra hazard of its own: Windows opens the Start menu when
+the Win key comes *up* without another key in between, and a Start menu that
+steals focus mid-dictation means the transcript is typed into the search box.
+whispa hides that key-press from Windows while the rest of the chord is held —
+and only then, so `Win`, `Win+E` and the rest keep working — and taps an unused
+virtual key when you press Win first, which is enough for Windows to treat it
+as part of a combination. It is the one part of this that has never been run on
+Windows here; if the Start menu still appears, say so and pick another
+shortcut in the meantime.
 
 ---
 
@@ -258,7 +323,15 @@ no Windows, so it is worth being precise about which claims are backed by a run.
 - **The whole learning loop against real model output**: real transcript → a
   user edit → correction learnt → *re-transcribed the same real audio and
   confirmed the learnt fix was applied.*
-- 129 unit tests. Hotkey matching including every hybrid tap/hold/latch
+- **Paragraph detection on real audio**: the real speech sample with a 2.5 s
+  silence spliced into the middle, through the real model and the real engine,
+  produced exactly two paragraphs broken at the right word — and the same
+  recording without the pause produced one, with the transcript unchanged. The
+  first design (decoding each pause-separated piece on its own) was thrown away
+  because that same test showed it degrading the transcript to "ASK NOT!"; the
+  version that ships decodes once and cuts only the text, at a measured cost of
+  nothing (1.25 s vs 1.29 s on the 12 s sample).
+- 171 unit tests. Hotkey matching including every hybrid tap/hold/latch
   transition with a fake clock; correction extraction and its refusal to learn
   from rewrites; span location under edits elsewhere in the document and in a
   30,000-character document; learner persistence, conflicts and thresholds;
@@ -286,6 +359,10 @@ no Windows, so it is worth being precise about which claims are backed by a run.
   unproven until you run it on a PC without Python.
 - Writing to the real Windows registry. The autostart logic is tested against
   an in-memory stand-in; `winreg` itself is not exercised here.
+- **Hiding the Windows key from the Start menu** for the `Ctrl + Win` shortcut.
+  The decision logic is unit-tested; the pynput key filter it drives is
+  Windows-only and has never run. If the Start menu appears mid-dictation, that
+  is where to look.
 
 Run the tests yourself:
 

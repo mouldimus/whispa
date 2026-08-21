@@ -18,6 +18,7 @@ from pathlib import Path
 
 from .app import DictationEngine, State
 from .config import Config, default_config_dir
+from .format import make_formatter
 from .hotkey import GlobalHotkey
 from .inject import KeyboardInjector, NullInjector
 from .transcribe import WhisperTranscriber
@@ -44,6 +45,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--input-device", type=int, help="microphone index")
     p.add_argument(
         "--inject", choices=["paste", "type", "clipboard"], help="how to deliver text"
+    )
+    p.add_argument(
+        "--paragraphs",
+        choices=["blank", "single", "off"],
+        help="paragraph breaks: blank line, single newline, or never",
+    )
+    p.add_argument(
+        "--no-voice-commands",
+        action="store_true",
+        help='ignore spoken structure commands ("new paragraph", "bullet point")',
     )
     p.add_argument("--dry-run", action="store_true", help="transcribe, never type")
     p.add_argument("--no-tray", action="store_true", help="no tray icon")
@@ -117,6 +128,7 @@ def apply_overrides(cfg: Config, args: argparse.Namespace) -> Config:
         ("compute_type", "compute_type"),
         ("input_device", "input_device"),
         ("inject", "inject_method"),
+        ("paragraphs", "paragraph_style"),
     ):
         value = getattr(args, attr, None)
         if value is not None:
@@ -127,6 +139,8 @@ def apply_overrides(cfg: Config, args: argparse.Namespace) -> Config:
         cfg.overlay_always_visible = True
     if args.no_learn:
         cfg.learn_from_edits = False
+    if args.no_voice_commands:
+        cfg.voice_commands = False
     return cfg
 
 
@@ -218,6 +232,7 @@ def main(argv: list[str] | None = None) -> int:
             else cfg.initial_prompt
         ),
         sample_rate=cfg.sample_rate,
+        paragraph_pause_seconds=cfg.paragraph_pause_seconds,
     )
 
     injector = (
@@ -257,6 +272,7 @@ def main(argv: list[str] | None = None) -> int:
         min_seconds=cfg.min_recording_seconds,
         replacements=cfg.replacements,
         trailing_space=cfg.trailing_space,
+        formatter=make_formatter(cfg),
         learner=learner,
         watcher=watcher,
         on_state=lambda state, detail: _on_state(state, detail, overlay, tray_ref),
@@ -299,6 +315,22 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
 
+    def set_hotkey(spec: str) -> None:
+        """Rebind the shortcut from the tray, and remember it.
+
+        Rebinding first: if the spec is unusable the exception reaches the tray
+        before anything has been written, so a bad choice cannot leave a config
+        file that stops whispa starting next time.
+        """
+        if hotkeys:
+            hotkeys[0].rebind(spec)
+        cfg.hotkey = spec
+        try:
+            cfg.save(args.config)
+        except OSError:
+            log.exception("shortcut changed but could not be saved")
+        log.info("shortcut is now %s", spec)
+
     tray = None
     if not args.no_tray:
         try:
@@ -313,6 +345,7 @@ def main(argv: list[str] | None = None) -> int:
                 learned_stats=lambda: learner.stats,
                 on_open_console=open_console if overlay is not None else None,
                 autostart=autostart,
+                on_set_hotkey=set_hotkey,
             )
             tray_ref[0] = tray
         except Exception:

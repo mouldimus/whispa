@@ -13,6 +13,7 @@ from typing import Callable
 import numpy as np
 
 from .audio import duration_seconds, peak_level
+from .format import render_marks
 from .transcribe import clean_text
 
 log = logging.getLogger(__name__)
@@ -76,6 +77,7 @@ class DictationEngine:
         on_state: Callable[[State, str], None] | None = None,
         learner=None,
         watcher=None,
+        formatter: Callable[[str], str] | None = None,
     ) -> None:
         self.recorder = recorder
         self.transcriber = transcriber
@@ -87,6 +89,10 @@ class DictationEngine:
         self.on_state = on_state
         self.learner = learner
         self.watcher = watcher
+        # Shapes the finished transcript into paragraphs and lists. Injected
+        # rather than imported so the engine has no opinion about formatting
+        # and the tests can watch exactly what gets typed.
+        self.formatter = formatter
         self.stats = Stats()
         # The exact string last injected, so the manual "fix that" dialog knows
         # what it is correcting.
@@ -207,6 +213,9 @@ class DictationEngine:
         if self.learner is not None:
             replacements.update(self.learner.replacements())
         text = clean_text(raw, replacements)
+        # The transcriber marks pauses with private-use characters; whether or
+        # not a formatter is configured, none of them may reach the clipboard.
+        text = self.formatter(text) if self.formatter else render_marks(text, "off")
 
         self.stats.audio_seconds += seconds
         self.stats.transcribe_seconds += elapsed

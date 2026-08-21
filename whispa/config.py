@@ -72,6 +72,31 @@ class Config:
     # injecting. Prevents a still-held Alt turning our ctrl+v into a menu call.
     modifier_release_timeout: float = 1.0
 
+    # --- formatting ---------------------------------------------------------
+    # Whisper returns one unbroken line. Structure comes from three places:
+    # the pauses between segments, spoken commands ("new paragraph", "bullet
+    # point"), and sentence capitalisation.
+    #
+    # "blank"  = paragraphs separated by a blank line (a document)
+    # "single" = one newline between paragraphs
+    # "off"    = never insert a newline. Use this in chat boxes where Enter
+    #            sends the message.
+    paragraph_style: str = "blank"
+    # A silence at least this long starts a new paragraph. Two seconds is a
+    # deliberate stop-and-think, not the beat between two sentences: measured
+    # against real speech, ordinary rhetorical pauses run 1.0-1.5s, so a lower
+    # value breaks paragraphs mid-thought. 0 disables pause-based paragraphing.
+    paragraph_pause_seconds: float = 2.0
+    # Honour spoken structure commands. See whispa/format.py for the list.
+    voice_commands: bool = True
+    # Extra or overriding commands, e.g. {"full stop": ".", "new section":
+    # "paragraph"}. Values may be "paragraph", "line", "bullet", "number", or
+    # any literal text. An empty value removes a default command.
+    voice_command_extras: dict[str, str] = field(default_factory=dict)
+    # Capitalise the first letter of each sentence, bullet and paragraph.
+    auto_capitalise: bool = True
+    bullet_prefix: str = "- "
+
     # --- behaviour ----------------------------------------------------------
     # --- indicator ----------------------------------------------------------
     # The on-screen pill: shows idle/recording/thinking, with a live input
@@ -157,6 +182,13 @@ class Config:
             )
         if self.tap_seconds <= 0:
             problems.append("tap_seconds must be > 0")
+        if self.paragraph_style not in ("blank", "single", "off"):
+            problems.append(
+                f"paragraph_style must be 'blank', 'single' or 'off', "
+                f"got {self.paragraph_style!r}"
+            )
+        if self.paragraph_pause_seconds < 0:
+            problems.append("paragraph_pause_seconds must be >= 0")
         if self.learn_min_count < 1:
             problems.append("learn_min_count must be >= 1")
         if self.learn_delay_seconds <= 0:
