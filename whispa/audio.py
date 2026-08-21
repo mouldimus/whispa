@@ -23,6 +23,8 @@ class Recorder(Protocol):
     def stop(self) -> np.ndarray: ...
     @property
     def is_recording(self) -> bool: ...
+    @property
+    def level(self) -> float: ...
 
 
 class MicRecorder:
@@ -42,23 +44,49 @@ class MicRecorder:
         self._lock = threading.Lock()
         self._recording = False
         self._overflowed = False
+        self._level = 0.0
 
     @property
     def is_recording(self) -> bool:
         return self._recording
+
+    @property
+    def level(self) -> float:
+        """Current input loudness, 0.0-1.0, for the on-screen meter.
+
+        This is what makes the indicator honest: it is computed from the audio
+        actually arriving from the device, so a dead or muted microphone shows
+        a flat meter instead of a reassuring animation.
+        """
+        return self._level
+
+    def _update_level(self, block: np.ndarray) -> None:
+        rms = float(np.sqrt(np.mean(np.square(block)))) if len(block) else 0.0
+        # Speech RMS sits around 0.02-0.2, so a linear bar barely moves. Map it
+        # through a decibel-ish curve for something that looks like a meter.
+        if rms <= 1e-5:
+            scaled = 0.0
+        else:
+            db = 20.0 * np.log10(rms)
+            scaled = float(np.clip((db + 60.0) / 60.0, 0.0, 1.0))
+        # Fast attack so speech registers immediately, slow release so the bar
+        # doesn't strobe between syllables.
+        self._level = scaled if scaled > self._level else self._level * 0.75 + scaled * 0.25
 
     def _callback(self, indata: np.ndarray, frames: int, time_info: Any, status: Any) -> None:
         if status:
             # Overruns are common on a busy machine and are not fatal - the
             # dropped frames just become a small gap in the audio.
             log.debug("audio status: %s", status)
+        block = indata.copy().reshape(-1)
+        self._update_level(block)
         with self._lock:
             if not self._recording:
                 return
             if self._collected_seconds() >= self.max_seconds:
                 self._overflowed = True
                 return
-            self._frames.append(indata.copy().reshape(-1))
+            self._frames.append(block)
 
     def _collected_seconds(self) -> float:
         return sum(len(f) for f in self._frames) / float(self.sample_rate)
@@ -71,6 +99,7 @@ class MicRecorder:
                 return
             self._frames = []
             self._overflowed = False
+            self._level = 0.0
             self._recording = True
         self._stream = sd.InputStream(
             samplerate=self.sample_rate,
@@ -88,6 +117,7 @@ class MicRecorder:
             if not self._recording:
                 return np.zeros(0, dtype=np.float32)
             self._recording = False
+            self._level = 0.0
         if self._stream is not None:
             try:
                 self._stream.stop()

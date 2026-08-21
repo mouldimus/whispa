@@ -26,9 +26,13 @@ class Config:
     # problem. Accepts pynput key names ("f9", "scroll_lock") or a chord
     # ("<ctrl>+<alt>+d") if the user insists.
     hotkey: str = "f9"
-    # "hold" = push-to-talk (record while held).
+    # "hybrid" = tap to latch on (tap again to stop), or hold for push-to-talk;
+    #            the key decides which by how long you held it.
+    # "hold"   = push-to-talk only.
     # "toggle" = press once to start, again to stop.
-    hotkey_mode: str = "hold"
+    hotkey_mode: str = "hybrid"
+    # Press-and-release faster than this counts as a tap rather than a hold.
+    tap_seconds: float = 0.35
 
     # --- model --------------------------------------------------------------
     # base.en on int8 is the sweet spot for a CPU-only box: ~1x realtime and
@@ -69,21 +73,65 @@ class Config:
     modifier_release_timeout: float = 1.0
 
     # --- behaviour ----------------------------------------------------------
+    # --- indicator ----------------------------------------------------------
+    # The on-screen pill: shows idle/recording/thinking, with a live input
+    # meter while recording so a dead microphone is visible immediately.
+    overlay: bool = True
+    # Keep the pill on screen when idle, instead of only during dictation.
+    overlay_always_visible: bool = False
+
+    # --- learning -----------------------------------------------------------
+    # Read the focused control back after injecting and learn from any edits.
+    learn_from_edits: bool = True
+    # How long to wait before reading back. Long enough to finish a sentence
+    # and fix it, short enough that the text is still on screen.
+    learn_delay_seconds: float = 6.0
+    # How many times a correction must repeat before it is applied
+    # automatically. 1 would act on a single change of mind.
+    learn_min_count: int = 2
+    # Feed learnt vocabulary to whisper as decoder bias, which prevents
+    # mistakes rather than patching them afterwards.
+    learn_bias_prompt: bool = True
+
     play_sounds: bool = True
     # Run a throwaway transcription at startup so the first real one isn't slow.
     warmup: bool = True
     log_level: str = "INFO"
+    # With no console window there is nowhere for errors to go, so they go to a
+    # file next to the config.
+    log_to_file: bool = True
     # Words/phrases rewritten after transcription, e.g. {"gonna": "going to"}.
     replacements: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Config":
+        return cls.load_checked(path)[0]
+
+    @classmethod
+    def load_checked(cls, path: Path | None = None) -> tuple["Config", str | None]:
+        """Load settings, returning (config, problem).
+
+        A hand-edited config with a stray comma must not stop whispa starting.
+        There is no console window to print a traceback to, so a broken file
+        falls back to defaults and reports the problem for the caller to
+        surface in the indicator and the log.
+        """
         path = path or (default_config_dir() / "config.json")
         if not path.exists():
-            return cls()
-        with path.open("r", encoding="utf-8") as fh:
-            raw: dict[str, Any] = json.load(fh)
-        return cls.from_dict(raw)
+            return cls(), None
+        try:
+            with path.open("r", encoding="utf-8") as fh:
+                raw: dict[str, Any] = json.load(fh)
+        except json.JSONDecodeError as exc:
+            return cls(), f"{path} is not valid JSON ({exc}); using defaults"
+        except OSError as exc:
+            return cls(), f"could not read {path} ({exc}); using defaults"
+        if not isinstance(raw, dict):
+            return cls(), f"{path} must contain a JSON object; using defaults"
+        try:
+            return cls.from_dict(raw), None
+        except (TypeError, ValueError) as exc:
+            return cls(), f"{path} has unusable values ({exc}); using defaults"
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "Config":
@@ -102,8 +150,17 @@ class Config:
     def validate(self) -> list[str]:
         """Return a list of human-readable problems; empty means usable."""
         problems = []
-        if self.hotkey_mode not in ("hold", "toggle"):
-            problems.append(f"hotkey_mode must be 'hold' or 'toggle', got {self.hotkey_mode!r}")
+        if self.hotkey_mode not in ("hold", "toggle", "hybrid"):
+            problems.append(
+                f"hotkey_mode must be 'hybrid', 'hold' or 'toggle', "
+                f"got {self.hotkey_mode!r}"
+            )
+        if self.tap_seconds <= 0:
+            problems.append("tap_seconds must be > 0")
+        if self.learn_min_count < 1:
+            problems.append("learn_min_count must be >= 1")
+        if self.learn_delay_seconds <= 0:
+            problems.append("learn_delay_seconds must be > 0")
         if self.inject_method not in ("paste", "type", "clipboard"):
             problems.append(
                 f"inject_method must be 'paste', 'type' or 'clipboard', got {self.inject_method!r}"

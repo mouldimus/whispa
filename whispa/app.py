@@ -74,6 +74,8 @@ class DictationEngine:
         replacements: dict[str, str] | None = None,
         trailing_space: bool = True,
         on_state: Callable[[State, str], None] | None = None,
+        learner=None,
+        watcher=None,
     ) -> None:
         self.recorder = recorder
         self.transcriber = transcriber
@@ -83,7 +85,12 @@ class DictationEngine:
         self.replacements = replacements or {}
         self.trailing_space = trailing_space
         self.on_state = on_state
+        self.learner = learner
+        self.watcher = watcher
         self.stats = Stats()
+        # The exact string last injected, so the manual "fix that" dialog knows
+        # what it is correcting.
+        self.last_injected: str | None = None
 
         self._state = State.IDLE
         self._lock = threading.Lock()
@@ -194,7 +201,12 @@ class DictationEngine:
         t0 = time.monotonic()
         raw = self.transcriber.transcribe(audio)
         elapsed = time.monotonic() - t0
-        text = clean_text(raw, self.replacements)
+        # Confirmed corrections are applied on top of the hand-written ones,
+        # and win, because they were learnt from this user's own edits.
+        replacements = dict(self.replacements)
+        if self.learner is not None:
+            replacements.update(self.learner.replacements())
+        text = clean_text(raw, replacements)
 
         self.stats.audio_seconds += seconds
         self.stats.transcribe_seconds += elapsed
@@ -217,10 +229,22 @@ class DictationEngine:
             self.stats.errors += 1
             self._set_state(State.ERROR, "could not type the text")
             return
+
+        self.last_injected = text
+        if self.watcher is not None:
+            # Watch what the user does to this text over the next few seconds;
+            # any edit is a correction to learn from.
+            self.watcher.note_injection(text)
         preview = text if len(text) <= 60 else text[:57] + "..."
         self._set_state(State.IDLE, preview)
 
     # --- helpers for tests / the tray ---------------------------------------
+
+    def teach(self, corrected: str) -> list[tuple[str, str]]:
+        """Manual correction path: 'what I actually said was ...'."""
+        if self.learner is None or not self.last_injected:
+            return []
+        return self.learner.observe(self.last_injected, corrected)
 
     def wait_idle(self, timeout: float = 30.0) -> bool:
         """Block until the queue drains. Returns False on timeout."""

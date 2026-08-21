@@ -1,4 +1,9 @@
-"""Entry point:  python -m whispa  [--options]"""
+"""Entry point:  pythonw -m whispa  [--options]
+
+Launched from whispa.bat there is no console window, so nothing here may rely
+on printing: progress goes to the on-screen pill, and errors go to a log file
+next to the config.
+"""
 
 from __future__ import annotations
 
@@ -7,6 +12,8 @@ import logging
 import signal
 import sys
 import threading
+import time
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from .app import DictationEngine, State
@@ -21,12 +28,16 @@ log = logging.getLogger("whispa")
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="whispa",
-        description="Hold a key, speak, release - the text lands in whatever "
-        "window has focus. Runs entirely offline.",
+        description="Tap or hold a key, speak, release - the text lands in "
+        "whatever window has focus. Runs entirely offline.",
     )
     p.add_argument("--config", type=Path, help="path to config.json")
     p.add_argument("--hotkey", help="e.g. f9, scroll_lock, <ctrl>+<alt>+d")
-    p.add_argument("--mode", choices=["hold", "toggle"], help="push-to-talk or toggle")
+    p.add_argument(
+        "--mode",
+        choices=["hybrid", "hold", "toggle"],
+        help="hybrid (tap to latch, hold to push-to-talk), hold, or toggle",
+    )
     p.add_argument("--model", help="base.en, small.en, medium.en, large-v3 ...")
     p.add_argument("--device", help="cpu or cuda")
     p.add_argument("--compute-type", help="int8, int8_float16, float16, float32")
@@ -34,16 +45,49 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--inject", choices=["paste", "type", "clipboard"], help="how to deliver text"
     )
+    p.add_argument("--dry-run", action="store_true", help="transcribe, never type")
+    p.add_argument("--no-tray", action="store_true", help="no tray icon")
+    p.add_argument("--no-overlay", action="store_true", help="no on-screen indicator")
     p.add_argument(
-        "--dry-run",
+        "--show-overlay-always",
         action="store_true",
-        help="transcribe and print, but do not touch the keyboard",
+        help="keep the indicator visible when idle",
     )
-    p.add_argument("--no-tray", action="store_true", help="run headless in the console")
-    p.add_argument("--list-devices", action="store_true", help="list microphones and exit")
-    p.add_argument("--write-config", action="store_true", help="write defaults and exit")
+    p.add_argument("--no-learn", action="store_true", help="disable learning from edits")
+    p.add_argument("--console", action="store_true", help="also log to stdout")
+    p.add_argument("--list-devices", action="store_true", help="list microphones, exit")
+    p.add_argument("--write-config", action="store_true", help="write defaults, exit")
     p.add_argument("--verbose", "-v", action="store_true")
     return p
+
+
+def setup_logging(cfg: Config, args: argparse.Namespace) -> None:
+    level = logging.DEBUG if args.verbose else getattr(
+        logging, cfg.log_level.upper(), logging.INFO
+    )
+    root = logging.getLogger()
+    root.setLevel(level)
+    fmt = logging.Formatter(
+        "%(asctime)s %(levelname)-7s %(name)s: %(message)s", "%H:%M:%S"
+    )
+    # Console handlers are pointless under pythonw and can even raise when
+    # stdout is not a real stream, so they are opt-in.
+    if args.console or args.list_devices or args.write_config:
+        if sys.stdout is not None:
+            handler = logging.StreamHandler(sys.stdout)
+            handler.setFormatter(fmt)
+            root.addHandler(handler)
+    if cfg.log_to_file:
+        try:
+            path = default_config_dir() / "whispa.log"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            handler = RotatingFileHandler(
+                path, maxBytes=512_000, backupCount=2, encoding="utf-8"
+            )
+            handler.setFormatter(fmt)
+            root.addHandler(handler)
+        except Exception:
+            pass
 
 
 def apply_overrides(cfg: Config, args: argparse.Namespace) -> Config:
@@ -59,21 +103,28 @@ def apply_overrides(cfg: Config, args: argparse.Namespace) -> Config:
         value = getattr(args, attr, None)
         if value is not None:
             setattr(cfg, field_name, value)
+    if args.no_overlay:
+        cfg.overlay = False
+    if args.show_overlay_always:
+        cfg.overlay_always_visible = True
+    if args.no_learn:
+        cfg.learn_from_edits = False
     return cfg
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s %(levelname)-7s %(message)s",
-        datefmt="%H:%M:%S",
-    )
 
     if args.write_config:
         path = Config().save(args.config)
         print(f"wrote defaults to {path}")
         return 0
+
+    cfg, load_problem = Config.load_checked(args.config)
+    cfg = apply_overrides(cfg, args)
+    setup_logging(cfg, args)
+    if load_problem:
+        log.error("%s", load_problem)
 
     if args.list_devices:
         from .audio import list_input_devices
@@ -82,12 +133,33 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[{dev['index']:>2}] {dev['name']}  ({dev['channels']}ch)")
         return 0
 
-    cfg = apply_overrides(Config.load(args.config), args)
     problems = cfg.validate()
     if problems:
         for problem in problems:
             print(f"config error: {problem}", file=sys.stderr)
+            log.error("config error: %s", problem)
         return 2
+
+    from .audio import MicRecorder
+    from .learn import CorrectionLearner
+    from .observe import CorrectionWatcher, make_observer
+
+    recorder = MicRecorder(
+        sample_rate=cfg.sample_rate,
+        device=cfg.input_device,
+        max_seconds=cfg.max_recording_seconds,
+    )
+    learner = CorrectionLearner(
+        path=default_config_dir() / "learned.json",
+        min_count=cfg.learn_min_count,
+    )
+    watcher = None
+    if cfg.learn_from_edits:
+        watcher = CorrectionWatcher(
+            observer=make_observer(True),
+            on_correction=learner.observe,
+            delay=cfg.learn_delay_seconds,
+        )
 
     transcriber = WhisperTranscriber(
         model=cfg.model,
@@ -97,49 +169,44 @@ def main(argv: list[str] | None = None) -> int:
         language=cfg.language,
         beam_size=cfg.beam_size,
         vad_filter=cfg.vad_filter,
-        initial_prompt=cfg.initial_prompt,
+        # Learnt vocabulary biases the decoder, so repeat mistakes are
+        # prevented rather than corrected after the fact.
+        initial_prompt=(
+            learner.prompt_bias(cfg.initial_prompt)
+            if cfg.learn_bias_prompt
+            else cfg.initial_prompt
+        ),
         sample_rate=cfg.sample_rate,
     )
 
-    if args.dry_run:
-        injector = NullInjector()
-    else:
-        injector = KeyboardInjector(
+    injector = (
+        NullInjector()
+        if args.dry_run
+        else KeyboardInjector(
             method=cfg.inject_method,
             type_delay=cfg.type_delay,
             restore_clipboard=cfg.restore_clipboard,
             modifier_release_timeout=cfg.modifier_release_timeout,
         )
-
-    from .audio import MicRecorder
-
-    recorder = MicRecorder(
-        sample_rate=cfg.sample_rate,
-        device=cfg.input_device,
-        max_seconds=cfg.max_recording_seconds,
     )
 
-    # Defined before the tray, whose Quit item closes over it.
     shutdown = threading.Event()
 
-    tray = None
-    if not args.no_tray:
+    overlay = None
+    if cfg.overlay:
         try:
-            from .tray import TrayIcon
+            from .overlay import Overlay
 
-            tray = TrayIcon(cfg.hotkey, cfg.model, on_quit=lambda: shutdown.set())
+            overlay = Overlay(
+                level_source=lambda: recorder.level,
+                always_visible=cfg.overlay_always_visible,
+            )
         except Exception:
-            log.warning("tray unavailable, continuing without it", exc_info=args.verbose)
+            log.warning("on-screen indicator unavailable", exc_info=True)
 
-    def on_state(state: State, detail: str) -> None:
-        if state is State.RECORDING:
-            log.info("listening...")
-        elif state is State.ERROR:
-            log.error("%s", detail or "error")
-        elif state is State.IDLE and detail:
-            log.info("-> %s", detail)
-        if tray is not None:
-            tray.set_state(state, detail)
+    # Both defined before anything closes over them.
+    tray_ref: list = [None]
+    hotkeys: list = []
 
     engine = DictationEngine(
         recorder=recorder,
@@ -149,61 +216,137 @@ def main(argv: list[str] | None = None) -> int:
         min_seconds=cfg.min_recording_seconds,
         replacements=cfg.replacements,
         trailing_space=cfg.trailing_space,
-        on_state=on_state,
+        learner=learner,
+        watcher=watcher,
+        on_state=lambda state, detail: _on_state(state, detail, overlay, tray_ref),
     )
+
+    def quit_everything() -> None:
+        shutdown.set()
+        if overlay is not None:
+            overlay.stop()
+
+    def fix_last() -> None:
+        """Open the correction dialog on the tkinter thread."""
+        if overlay is None or not engine.last_injected:
+            return
+        from .dialog import show_correction_dialog
+
+        overlay.call_soon(
+            lambda: show_correction_dialog(
+                engine.last_injected or "",
+                on_corrected=lambda corrected: engine.teach(corrected),
+                parent=overlay._root,
+            )
+        )
+
+    tray = None
+    if not args.no_tray:
+        try:
+            from .tray import TrayIcon
+
+            tray = TrayIcon(
+                hotkey=cfg.hotkey,
+                model=cfg.model,
+                mode=cfg.hotkey_mode,
+                on_quit=quit_everything,
+                on_fix_last=fix_last if overlay is not None else None,
+                learned_stats=lambda: learner.stats,
+            )
+            tray_ref[0] = tray
+        except Exception:
+            log.warning("tray unavailable, continuing without it", exc_info=True)
+
     engine.start()
 
-    print(f"whispa: loading {cfg.model!r} (first run downloads the model)...")
+    def startup() -> None:
+        """Load the model, then arm the hotkey. Runs off the UI thread."""
+        if overlay is not None and load_problem:
+            # No console to print to, so a broken config has to be visible here.
+            overlay.set_state(State.ERROR, "config ignored - see log", force=True)
+            time.sleep(2.5)
+        if overlay is not None:
+            overlay.set_state(State.TRANSCRIBING, f"loading {cfg.model}", force=True)
+        try:
+            if cfg.warmup:
+                transcriber.warmup()
+            else:
+                transcriber.load()
+        except Exception as exc:
+            log.exception("could not load the model")
+            if overlay is not None:
+                overlay.set_state(State.ERROR, f"model failed: {exc}", force=True)
+            return
+        try:
+            hotkey = GlobalHotkey(
+                spec=cfg.hotkey,
+                mode=cfg.hotkey_mode,
+                on_start=engine.begin_recording,
+                on_stop=engine.end_recording,
+                on_held_change=lambda held: setattr(injector, "held_modifiers", held),
+                tap_seconds=cfg.tap_seconds,
+            )
+            hotkey.start()
+            hotkeys.append(hotkey)
+        except Exception as exc:
+            log.exception("could not register the global hotkey")
+            if overlay is not None:
+                overlay.set_state(State.ERROR, f"hotkey failed: {exc}", force=True)
+            return
+        learning = "on" if (watcher and watcher.available) else "manual"
+        log.info(
+            "ready: %s (%s), learning %s", cfg.hotkey, cfg.hotkey_mode, learning
+        )
+        if overlay is not None:
+            overlay.set_state(State.IDLE, "ready", force=False)
+
+    threading.Thread(target=startup, name="whispa-startup", daemon=True).start()
+
+    if tray is not None:
+        try:
+            tray.run_detached()
+        except Exception:
+            log.warning("tray could not run detached; using a thread", exc_info=True)
+            threading.Thread(target=tray.run, daemon=True).start()
+
     try:
-        if cfg.warmup:
-            transcriber.warmup()
-        else:
-            transcriber.load()
-    except Exception as exc:
-        print(f"could not load the model: {exc}", file=sys.stderr)
-        return 3
-
-    hotkey = GlobalHotkey(
-        spec=cfg.hotkey,
-        mode=cfg.hotkey_mode,
-        on_start=engine.begin_recording,
-        on_stop=engine.end_recording,
-        # Let the injector see which modifiers are physically down, so it can
-        # wait for them rather than pasting into a modified keystroke.
-        on_held_change=lambda held: setattr(injector, "held_modifiers", held),
-    )
-    try:
-        hotkey.start()
-    except Exception as exc:
-        print(f"could not register the global hotkey: {exc}", file=sys.stderr)
-        return 4
-
-    verb = "Hold" if cfg.hotkey_mode == "hold" else "Press"
-    print(f"whispa ready. {verb} [{cfg.hotkey}] and speak. Ctrl-C to quit.")
-    if args.dry_run:
-        print("(dry run: text is printed, not typed)")
-
-    signal.signal(signal.SIGINT, lambda *_: shutdown.set())
+        signal.signal(signal.SIGINT, lambda *_: quit_everything())
+    except ValueError:
+        pass  # not on the main thread, e.g. under a test harness
 
     try:
-        if tray is not None:
-            # pystray owns the main thread on Windows; the hotkey listener and
-            # the transcription worker are already on their own threads.
-            threading.Thread(
-                target=lambda: (shutdown.wait(), tray.stop()), daemon=True
-            ).start()
-            tray.run()
+        if overlay is not None:
+            # tkinter insists on the main thread; the tray, the hotkey listener
+            # and the transcription worker all have their own.
+            overlay.run()
         else:
             shutdown.wait()
     finally:
-        hotkey.stop()
+        shutdown.set()
+        for hk in hotkeys:
+            hk.stop()
+        if watcher is not None:
+            watcher.cancel()
         engine.shutdown()
         if tray is not None:
             tray.stop()
-        print("\n" + engine.stats.summary())
-        cfg_dir = default_config_dir()
-        log.debug("config dir was %s", cfg_dir)
+        learner.save()
+        log.info("stopped: %s", engine.stats.summary())
+        if args.console:
+            print("\n" + engine.stats.summary())
     return 0
+
+
+def _on_state(state: State, detail: str, overlay, tray_ref) -> None:
+    if state is State.ERROR:
+        log.error("%s", detail or "error")
+    elif state is State.IDLE and detail:
+        log.info("-> %s", detail)
+    if overlay is not None:
+        overlay.set_state(state, detail)
+    tray = tray_ref[0] if tray_ref else None
+    if tray is not None:
+        tray.set_state(state, detail)
 
 
 if __name__ == "__main__":

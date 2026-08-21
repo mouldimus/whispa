@@ -37,24 +37,66 @@ def _make_image(state: State, size: int = 64):
 
 
 class TrayIcon:
-    def __init__(self, hotkey: str, model: str, on_quit: Callable[[], None]) -> None:
+    def __init__(
+        self,
+        hotkey: str,
+        model: str,
+        mode: str,
+        on_quit: Callable[[], None],
+        on_fix_last: Callable[[], None] | None = None,
+        learned_stats: Callable[[], dict] | None = None,
+    ) -> None:
         self.hotkey = hotkey
         self.model = model
+        self.mode = mode
         self.on_quit = on_quit
+        self.on_fix_last = on_fix_last
+        self.learned_stats = learned_stats
         self._icon = None
         self._status = "ready"
+
+    def _usage_hint(self) -> str:
+        if self.mode == "hybrid":
+            return f"Tap or hold [{self.hotkey}] to dictate"
+        if self.mode == "toggle":
+            return f"Press [{self.hotkey}] to start and stop"
+        return f"Hold [{self.hotkey}] to dictate"
+
+    def _learned_label(self, _item=None) -> str:
+        if self.learned_stats is None:
+            return "Learning: off"
+        try:
+            stats = self.learned_stats()
+        except Exception:
+            return "Learning: unavailable"
+        return f"Learned: {stats.get('active', 0)} active, {stats.get('tracked', 0)} tracked"
 
     def _build(self):
         import pystray
 
-        menu = pystray.Menu(
+        items = [
             pystray.MenuItem(lambda _: f"Status: {self._status}", None, enabled=False),
-            pystray.MenuItem(f"Hold [{self.hotkey}] to dictate", None, enabled=False),
+            pystray.MenuItem(self._usage_hint(), None, enabled=False),
             pystray.MenuItem(f"Model: {self.model}", None, enabled=False),
+            pystray.MenuItem(self._learned_label, None, enabled=False),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Quit", self._quit),
+        ]
+        if self.on_fix_last is not None:
+            items.append(
+                pystray.MenuItem("Fix last dictation...", self._fix_last, default=True)
+            )
+            items.append(pystray.Menu.SEPARATOR)
+        items.append(pystray.MenuItem("Quit", self._quit))
+        return pystray.Icon(
+            "whispa", _make_image(State.IDLE), "whispa - ready", pystray.Menu(*items)
         )
-        return pystray.Icon("whispa", _make_image(State.IDLE), "whispa - ready", menu)
+
+    def _fix_last(self, _icon=None, _item=None) -> None:
+        if self.on_fix_last is not None:
+            try:
+                self.on_fix_last()
+            except Exception:
+                log.exception("could not open the correction dialog")
 
     def _quit(self, icon, _item) -> None:
         try:
@@ -78,6 +120,15 @@ class TrayIcon:
         """Blocks on the platform event loop until Quit is chosen."""
         self._icon = self._build()
         self._icon.run()
+
+    def run_detached(self) -> None:
+        """Start the icon without owning the calling thread.
+
+        Needed because the overlay's tkinter loop wants the main thread, and
+        only one of the two can have it.
+        """
+        self._icon = self._build()
+        self._icon.run_detached()
 
     def stop(self) -> None:
         if self._icon is not None:

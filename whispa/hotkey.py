@@ -9,6 +9,7 @@ That keeps the interesting half testable on a machine with no keyboard.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Callable
 
 log = logging.getLogger(__name__)
@@ -50,16 +51,40 @@ def parse_hotkey(spec: str) -> frozenset[str]:
 class HotkeySpec:
     """Tracks held keys and decides when to start/stop.
 
-    'hold' mode fires start once the full combination is down, and stop as soon
-    as any part of it comes up. 'toggle' mode fires start on the first complete
-    press and stop on the next one, ignoring releases.
+    Three modes:
+
+    * 'hold'   - push-to-talk. Start when the combination goes down, stop as
+                 soon as any part of it comes up.
+    * 'toggle' - press once to start, again to stop; releases are ignored.
+    * 'hybrid' - both, on one key, chosen by how long you hold it. A quick tap
+                 latches recording on until the next tap; holding it down for
+                 longer than `tap_seconds` behaves exactly like push-to-talk.
+                 This is the default, because which one you want depends on
+                 whether you are dictating a phrase or a paragraph, and you
+                 shouldn't have to decide that in advance.
     """
 
-    def __init__(self, spec: str, mode: str = "hold") -> None:
+    def __init__(
+        self,
+        spec: str,
+        mode: str = "hybrid",
+        tap_seconds: float = 0.35,
+        clock: Callable[[], float] | None = None,
+    ) -> None:
         self.required = parse_hotkey(spec)
         self.mode = mode
+        self.tap_seconds = tap_seconds
+        # Injectable so the tap/hold boundary can be tested without sleeping.
+        self._clock = clock or time.monotonic
         self.held: set[str] = set()
         self.active = False
+        # hybrid only: recording is latched on after a tap, and survives the
+        # key coming back up.
+        self.latched = False
+        self._pressed_at = 0.0
+        # Set when a press already produced the 'stop', so the release that
+        # follows it doesn't produce a second one.
+        self._consumed = False
 
     @property
     def held_modifiers(self) -> set[str]:
@@ -77,6 +102,21 @@ class HotkeySpec:
         self.held.add(name)
         if already or not self._satisfied():
             return None
+        if self.mode == "hybrid":
+            if self.active and self.latched:
+                # Second tap of a latched recording: end it here, and remember
+                # that the matching release must not fire another stop.
+                self.active = False
+                self.latched = False
+                self._consumed = True
+                return "stop"
+            if not self.active:
+                self.active = True
+                self.latched = False
+                self._consumed = False
+                self._pressed_at = self._clock()
+                return "start"
+            return None
         if self.mode == "toggle":
             self.active = not self.active
             return "start" if self.active else "stop"
@@ -89,6 +129,22 @@ class HotkeySpec:
         """Feed a key-up. Returns 'stop' or None."""
         name = canonical(name)
         self.held.discard(name)
+        if self.mode == "hybrid":
+            if name not in self.required:
+                return None
+            if self._consumed:
+                self._consumed = False
+                return None
+            if not self.active:
+                return None
+            if (self._clock() - self._pressed_at) < self.tap_seconds:
+                # Too quick to be push-to-talk: treat it as a tap and keep
+                # recording until the next press.
+                self.latched = True
+                return None
+            self.active = False
+            self.latched = False
+            return "stop"
         if self.mode == "toggle":
             return None
         if self.active and name in self.required:
@@ -100,6 +156,8 @@ class HotkeySpec:
         """Drop all state - used when the listener restarts or focus is lost."""
         self.held.clear()
         self.active = False
+        self.latched = False
+        self._consumed = False
 
 
 def _key_name(key) -> str:
@@ -125,8 +183,9 @@ class GlobalHotkey:
         on_start: Callable[[], None],
         on_stop: Callable[[], None],
         on_held_change: Callable[[set[str]], None] | None = None,
+        tap_seconds: float = 0.35,
     ) -> None:
-        self.matcher = HotkeySpec(spec, mode)
+        self.matcher = HotkeySpec(spec, mode, tap_seconds=tap_seconds)
         self.on_start = on_start
         self.on_stop = on_stop
         self.on_held_change = on_held_change

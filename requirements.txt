@@ -14,3 +14,11 @@ pyperclip>=1.8.2
 # System-tray icon. Drop these two if you always run with --no-tray.
 pystray>=0.19.5
 pillow>=10.0.0
+
+# Reads the focused control back so edits can be learnt from. Optional:
+# without it, automatic learning is off and the tray's "Fix last dictation"
+# dialog still teaches whispa. Windows only.
+uiautomation>=2.0.18 ; sys_platform == "win32"
+
+# The on-screen indicator uses tkinter, which ships with Python - no entry
+# needed here, but note that some minimal Python builds omit it.

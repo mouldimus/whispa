@@ -307,5 +307,267 @@ class TestEngine(unittest.TestCase):
         self.assertEqual(self.injector.injected, ["hello world"])
 
 
+
+class FakeClock:
+    """Controllable time, so tap-vs-hold is tested without sleeping."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class TestHybridMode(unittest.TestCase):
+    """Tap latches recording on; holding is push-to-talk. One key, both."""
+
+    def setUp(self):
+        self.clock = FakeClock()
+        self.spec = HotkeySpec("f9", "hybrid", tap_seconds=0.35, clock=self.clock)
+
+    def test_hold_behaves_as_push_to_talk(self):
+        self.assertEqual(self.spec.press("f9"), "start")
+        self.clock.advance(1.2)
+        self.assertEqual(self.spec.release("f9"), "stop")
+        self.assertFalse(self.spec.latched)
+
+    def test_tap_latches_recording_on(self):
+        self.assertEqual(self.spec.press("f9"), "start")
+        self.clock.advance(0.1)
+        # Releasing after a quick tap must NOT stop the recording.
+        self.assertIsNone(self.spec.release("f9"))
+        self.assertTrue(self.spec.latched)
+        self.assertTrue(self.spec.active)
+
+    def test_second_tap_stops_a_latched_recording(self):
+        self.spec.press("f9")
+        self.clock.advance(0.1)
+        self.spec.release("f9")
+        self.clock.advance(5.0)
+        self.assertEqual(self.spec.press("f9"), "stop")
+        # The release that follows must not emit a second stop.
+        self.assertIsNone(self.spec.release("f9"))
+        self.assertFalse(self.spec.active)
+
+    def test_tap_then_hold_then_tap_cycle(self):
+        # tap on
+        self.spec.press("f9")
+        self.clock.advance(0.1)
+        self.assertIsNone(self.spec.release("f9"))
+        # tap off
+        self.assertEqual(self.spec.press("f9"), "stop")
+        self.assertIsNone(self.spec.release("f9"))
+        # now a hold, which must work normally afterwards
+        self.assertEqual(self.spec.press("f9"), "start")
+        self.clock.advance(2.0)
+        self.assertEqual(self.spec.release("f9"), "stop")
+
+    def test_exact_threshold_counts_as_hold(self):
+        self.spec.press("f9")
+        self.clock.advance(0.35)
+        self.assertEqual(self.spec.release("f9"), "stop")
+
+    def test_auto_repeat_while_holding_does_not_stop(self):
+        self.assertEqual(self.spec.press("f9"), "start")
+        for _ in range(5):
+            self.assertIsNone(self.spec.press("f9"))
+        self.clock.advance(1.0)
+        self.assertEqual(self.spec.release("f9"), "stop")
+
+    def test_unrelated_keys_ignored_while_latched(self):
+        self.spec.press("f9")
+        self.clock.advance(0.1)
+        self.spec.release("f9")
+        self.assertIsNone(self.spec.press("a"))
+        self.assertIsNone(self.spec.release("a"))
+        self.assertTrue(self.spec.active, "typing must not end a latched recording")
+
+    def test_reset_clears_latch(self):
+        self.spec.press("f9")
+        self.clock.advance(0.1)
+        self.spec.release("f9")
+        self.spec.reset()
+        self.assertFalse(self.spec.latched)
+        self.assertFalse(self.spec.active)
+
+    def test_hybrid_is_the_default_mode(self):
+        self.assertEqual(Config().hotkey_mode, "hybrid")
+
+
+class TestLevelMeter(unittest.TestCase):
+    """The indicator must reflect the real signal, not just animate."""
+
+    def _level_after(self, amplitude, blocks=6):
+        from whispa.audio import MicRecorder
+
+        rec = MicRecorder()
+        rec._level = 0.0
+        block = (np.random.RandomState(2).randn(1024) * amplitude).astype(np.float32)
+        for _ in range(blocks):
+            rec._update_level(block)
+        return rec.level
+
+    def test_silence_reads_flat(self):
+        self.assertEqual(self._level_after(0.0), 0.0)
+
+    def test_speech_registers(self):
+        self.assertGreater(self._level_after(0.05), 0.3)
+
+    def test_louder_is_higher(self):
+        self.assertGreater(self._level_after(0.3), self._level_after(0.03))
+
+    def test_level_is_bounded(self):
+        self.assertLessEqual(self._level_after(5.0), 1.0)
+
+    def test_level_resets_when_recording_stops(self):
+        from whispa.audio import MicRecorder
+
+        rec = MicRecorder()
+        rec._recording = True
+        rec._level = 0.8
+        rec.stop()
+        self.assertEqual(rec.level, 0.0)
+
+
+class TestEngineLearning(unittest.TestCase):
+    def test_confirmed_corrections_are_applied_to_new_transcripts(self):
+        import tempfile
+        from whispa.learn import CorrectionLearner
+
+        with tempfile.TemporaryDirectory() as tmp:
+            learner = CorrectionLearner(Path(tmp) / "l.json", min_count=2)
+            learner.observe("call Jon", "call John")
+            learner.observe("call Jon", "call John")
+
+            injector = NullInjector()
+            engine = DictationEngine(
+                recorder=FakeRecorder(speech(2.0)),
+                transcriber=FakeTranscriber("please call Jon back"),
+                injector=injector,
+                learner=learner,
+            )
+            engine.start()
+            engine.begin_recording()
+            engine.end_recording()
+            self.assertTrue(engine.wait_idle(5))
+            engine.shutdown()
+            self.assertEqual(injector.injected, ["please call John back "])
+
+    def test_unconfirmed_corrections_are_not_applied(self):
+        import tempfile
+        from whispa.learn import CorrectionLearner
+
+        with tempfile.TemporaryDirectory() as tmp:
+            learner = CorrectionLearner(Path(tmp) / "l.json", min_count=2)
+            learner.observe("call Jon", "call John")
+
+            injector = NullInjector()
+            engine = DictationEngine(
+                recorder=FakeRecorder(speech(2.0)),
+                transcriber=FakeTranscriber("please call Jon back"),
+                injector=injector,
+                learner=learner,
+            )
+            engine.start()
+            engine.begin_recording()
+            engine.end_recording()
+            self.assertTrue(engine.wait_idle(5))
+            engine.shutdown()
+            self.assertEqual(injector.injected, ["please call Jon back "])
+
+    def test_watcher_is_told_what_was_injected(self):
+        seen = []
+
+        class FakeWatcher:
+            available = True
+
+            def note_injection(self, text):
+                seen.append(text)
+
+        injector = NullInjector()
+        engine = DictationEngine(
+            recorder=FakeRecorder(speech(2.0)),
+            transcriber=FakeTranscriber("hello world"),
+            injector=injector,
+            watcher=FakeWatcher(),
+        )
+        engine.start()
+        engine.begin_recording()
+        engine.end_recording()
+        self.assertTrue(engine.wait_idle(5))
+        engine.shutdown()
+        self.assertEqual(seen, ["hello world "])
+        self.assertEqual(engine.last_injected, "hello world ")
+
+    def test_manual_teach_records_the_correction(self):
+        import tempfile
+        from whispa.learn import CorrectionLearner
+
+        with tempfile.TemporaryDirectory() as tmp:
+            learner = CorrectionLearner(Path(tmp) / "l.json", min_count=2)
+            injector = NullInjector()
+            engine = DictationEngine(
+                recorder=FakeRecorder(speech(2.0)),
+                transcriber=FakeTranscriber("deploy to reddis"),
+                injector=injector,
+                learner=learner,
+            )
+            engine.start()
+            engine.begin_recording()
+            engine.end_recording()
+            self.assertTrue(engine.wait_idle(5))
+            pairs = engine.teach("deploy to Redis")
+            engine.shutdown()
+            self.assertEqual(pairs, [("reddis", "Redis")])
+
+    def test_teach_without_a_previous_utterance_is_safe(self):
+        engine = DictationEngine(
+            recorder=FakeRecorder(speech(1.0)),
+            transcriber=FakeTranscriber(),
+            injector=NullInjector(),
+            learner=None,
+        )
+        self.assertEqual(engine.teach("anything"), [])
+
+
+
+class TestConfigRobustness(unittest.TestCase):
+    """A hand-edited config must never stop whispa from starting.
+
+    There is no console window any more, so a traceback would look exactly
+    like the app silently doing nothing.
+    """
+
+    def _load(self, contents):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            path.write_text(contents)
+            return Config.load_checked(path)
+
+    def test_broken_json_falls_back_to_defaults(self):
+        cfg, problem = self._load("{ this is not json")
+        self.assertIsNotNone(problem)
+        self.assertEqual(cfg.hotkey_mode, "hybrid")
+
+    def test_non_object_json_is_reported(self):
+        cfg, problem = self._load("[1, 2, 3]")
+        self.assertIsNotNone(problem)
+        self.assertEqual(cfg.hotkey, "f9")
+
+    def test_valid_config_reports_no_problem(self):
+        cfg, problem = self._load(json.dumps({"hotkey": "f8"}))
+        self.assertIsNone(problem)
+        self.assertEqual(cfg.hotkey, "f8")
+
+    def test_missing_file_is_not_a_problem(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg, problem = Config.load_checked(Path(tmp) / "absent.json")
+            self.assertIsNone(problem)
+            self.assertEqual(cfg.hotkey, "f9")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
