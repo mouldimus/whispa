@@ -47,22 +47,27 @@ echo.
 goto :skip_git
 
 :have_git
+REM %ROOT% ends with a backslash (that is what %~dp0 gives), and "%ROOT%"
+REM would therefore end in \" - which the git command line reads as an
+REM escaped quote, mangling every argument after it. The trailing dot
+REM ("C:\Tools\whispa\.") is the same directory and quote-safe. Seen for
+REM real: 'fatal: cannot change to C:\Tools\whispa" init --quiet'.
 if exist "%ROOT%.git" (
   echo  Checking for the latest version...
-  "%GITEXE%" -C "%ROOT%" pull --ff-only --quiet origin %REPO_BRANCH% >nul 2>&1
+  "%GITEXE%" -C "%ROOT%." pull --ff-only --quiet origin %REPO_BRANCH% >nul 2>&1
 ) else (
   echo  Setting this folder up to receive automatic updates...
-  "%GITEXE%" -C "%ROOT%" init --quiet
-  "%GITEXE%" -C "%ROOT%" remote add origin "%REPO_URL%"
-  "%GITEXE%" -C "%ROOT%" fetch origin
+  "%GITEXE%" -C "%ROOT%." init --quiet
+  "%GITEXE%" -C "%ROOT%." remote add origin "%REPO_URL%"
+  "%GITEXE%" -C "%ROOT%." fetch origin
   if errorlevel 1 (
     echo  Could not reach the update repo - check your internet connection.
     echo  Setup will continue; re-run install.bat later to enable updates.
-    "%GITEXE%" -C "%ROOT%" remote remove origin >nul 2>&1
+    "%GITEXE%" -C "%ROOT%." remote remove origin >nul 2>&1
     goto :skip_git
   )
-  "%GITEXE%" -C "%ROOT%" checkout -f %REPO_BRANCH%
-  "%GITEXE%" -C "%ROOT%" branch --set-upstream-to=origin/%REPO_BRANCH% %REPO_BRANCH% >nul 2>&1
+  "%GITEXE%" -C "%ROOT%." checkout -f %REPO_BRANCH%
+  "%GITEXE%" -C "%ROOT%." branch --set-upstream-to=origin/%REPO_BRANCH% %REPO_BRANCH% >nul 2>&1
   echo  Done - this copy now updates itself automatically.
 )
 :skip_git
