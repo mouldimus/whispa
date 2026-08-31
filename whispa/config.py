@@ -121,6 +121,10 @@ class Config:
     play_sounds: bool = True
     # Run a throwaway transcription at startup so the first real one isn't slow.
     warmup: bool = True
+    # Pull updates from git on startup when this copy is a clone (see
+    # whispa/update.py). No-op, silently, if it isn't - e.g. a hand-copied
+    # folder rather than `git clone`.
+    auto_update: bool = True
     log_level: str = "INFO"
     # With no console window there is nowhere for errors to go, so they go to a
     # file next to the config.

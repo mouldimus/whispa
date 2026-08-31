@@ -11,11 +11,63 @@ set "ROOT=%~dp0"
 set "PYVER=3.12.10"
 set "PYEXE="
 set "PYARG="
+set "REPO_URL=https://github.com/mouldimus/whispa.git"
+set "REPO_BRANCH=master"
 
 echo.
 echo  ==========================================
 echo    whispa setup
 echo  ==========================================
+echo.
+
+REM ---------- 0. git, and turn this folder into an update-able checkout ------
+REM whispa updates itself on every launch by pulling from git (see
+REM whispa/update.py), so this folder needs to be a real checkout of the
+REM private repo rather than just a copy. Existing folder-copy installs are
+REM converted in place here, without touching .venv or any of your settings
+REM (those live under %%APPDATA%%\whispa, not in this folder).
+call :find_git
+if not defined GITEXE goto :offer_git_install
+goto :have_git
+
+:offer_git_install
+echo  Git was not found on this PC. whispa uses it to fetch updates.
+echo  ^(Automatic updates are optional - setup continues either way.^)
+echo.
+choice /C YN /N /M "  Install Git now?  [Y/N] "
+if errorlevel 2 goto :skip_git
+echo.
+call :install_git
+call :find_git
+if defined GITEXE goto :have_git
+echo  Could not install Git automatically. Continuing without auto-update;
+echo  install it yourself from https://git-scm.com/download/win and re-run
+echo  install.bat to enable it.
+echo.
+goto :skip_git
+
+:have_git
+if exist "%ROOT%.git" (
+  echo  Checking for the latest version...
+  "%GITEXE%" -C "%ROOT%" pull --ff-only --quiet origin %REPO_BRANCH% >nul 2>&1
+) else (
+  echo  Setting this folder up to receive automatic updates...
+  "%GITEXE%" -C "%ROOT%" init --quiet
+  "%GITEXE%" -C "%ROOT%" remote add origin "%REPO_URL%"
+  "%GITEXE%" -C "%ROOT%" fetch origin
+  if errorlevel 1 (
+    echo  Could not reach the update repo - check your internet connection.
+    echo  Setup will continue; re-run install.bat later to enable updates.
+    "%GITEXE%" -C "%ROOT%" remote remove origin >nul 2>&1
+    goto :skip_git
+  )
+  echo  You may be asked to sign in to GitHub now - that only happens once,
+  echo  Git remembers it after this.
+  "%GITEXE%" -C "%ROOT%" checkout -f %REPO_BRANCH%
+  "%GITEXE%" -C "%ROOT%" branch --set-upstream-to=origin/%REPO_BRANCH% %REPO_BRANCH% >nul 2>&1
+  echo  Done - this copy now updates itself automatically.
+)
+:skip_git
 echo.
 
 REM ---------- 1. find a usable Python ----------------------------------------
@@ -77,6 +129,26 @@ exit /b 0
 REM ===========================================================================
 REM Helpers
 REM ===========================================================================
+
+:find_git
+set "GITEXE="
+where git >nul 2>&1
+if errorlevel 1 exit /b
+set "GITEXE=git"
+exit /b
+
+:install_git
+where winget >nul 2>&1
+if errorlevel 1 (
+  echo  winget is not available; install Git manually from:
+  echo      https://git-scm.com/download/win
+  echo.
+  exit /b
+)
+echo  Installing Git via winget...
+winget install --id Git.Git -e --source winget ^
+  --accept-package-agreements --accept-source-agreements --disable-interactivity
+exit /b
 
 :find_python
 REM Sets PYEXE/PYARG to the first interpreter that is 3.11 or newer.

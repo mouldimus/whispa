@@ -32,6 +32,27 @@ first run only), then `ready`.
 
 To have it running from login, use the tray's **Settings → Start with Windows**.
 
+`install.bat` also turns this folder into a checkout of whispa's private git
+repo (installing Git the same way it installs Python, if needed), which is
+what lets it **update itself** afterwards — see below. The first time it does
+this you may see a GitHub sign-in window; that happens once per machine.
+
+---
+
+## Updating
+
+Once a machine has been through `install.bat`, that copy of whispa checks for
+a newer version every time it starts: if one is there, it pulls it, resyncs
+dependencies only if `requirements.txt` changed, and restarts itself once,
+silently — no console window, no prompt. Ship a fix by pushing to the repo;
+every machine picks it up the next time someone dictates something.
+
+If a machine is offline, has local edits sitting in the folder, or was never
+converted to a git checkout, it just starts normally on whatever version is
+already there — this is best-effort and never blocks startup. Turn it off
+per-machine with `auto_update: false` in `config.json` if one machine needs to
+stay pinned to a version.
+
 ---
 
 ## Dictating
@@ -205,6 +226,8 @@ Run `whispa-console.bat --write-config` to create the settings file, then edit
 - `initial_prompt` — a sentence of context that biases spelling. Your jargon
   and product names here is the cheapest accuracy win available; learned
   vocabulary is appended to it automatically.
+- `auto_update` — pull updates from git on startup (default `true`). See
+  *Updating* above.
 
 If a config file is corrupt, whispa starts on defaults and says so in the log
 and the indicator rather than failing to appear.
@@ -308,6 +331,7 @@ because tkinter insists; the tray runs detached.
 | `whispa/overlay.py` | The on-screen pill |
 | `whispa/dialog.py` | "Fix last dictation" dialog |
 | `whispa/tray.py` | Tray icon |
+| `whispa/update.py` | Git-based self-update, run at startup |
 | `whispa/__main__.py` | CLI entry point and startup sequencing |
 
 ---
@@ -357,6 +381,13 @@ no Windows, so it is worth being precise about which claims are backed by a run.
 - **`install.bat` has never been executed** — there is no Windows here. Its
   logic and its download URLs were checked, but the Python bootstrap itself is
   unproven until you run it on a PC without Python.
+- **The git bootstrap in `install.bat`** (installing Git via winget, turning
+  an existing folder-copy into a checkout with `git init` + `checkout -f`) and
+  **the self-update in `whispa/update.py`** (the git subprocess calls, the
+  GitHub credential prompt, `os.execv` relaunching `pythonw.exe`) — the update
+  logic itself is unit-tested against a fake git, but none of it has run
+  against real git, a real GitHub credential prompt, or a real Windows
+  process relaunch.
 - Writing to the real Windows registry. The autostart logic is tested against
   an in-memory stand-in; `winreg` itself is not exercised here.
 - **Hiding the Windows key from the Start menu** for the `Ctrl + Win` shortcut.

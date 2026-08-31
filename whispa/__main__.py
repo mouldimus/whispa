@@ -200,6 +200,16 @@ def main(argv: list[str] | None = None) -> int:
             log.error("config error: %s", problem)
         return 2
 
+    if cfg.auto_update:
+        try:
+            from .update import check_and_apply, relaunch
+
+            if check_and_apply():
+                relaunch()
+                return 0  # pragma: no cover - execv replaces this process
+        except Exception:
+            log.warning("auto-update check failed", exc_info=True)
+
     from .audio import MicRecorder
     from .learn import CorrectionLearner
     from .observe import CorrectionWatcher, make_observer
