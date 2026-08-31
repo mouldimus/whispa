@@ -61,8 +61,6 @@ if exist "%ROOT%.git" (
     "%GITEXE%" -C "%ROOT%" remote remove origin >nul 2>&1
     goto :skip_git
   )
-  echo  You may be asked to sign in to GitHub now - that only happens once,
-  echo  Git remembers it after this.
   "%GITEXE%" -C "%ROOT%" checkout -f %REPO_BRANCH%
   "%GITEXE%" -C "%ROOT%" branch --set-upstream-to=origin/%REPO_BRANCH% %REPO_BRANCH% >nul 2>&1
   echo  Done - this copy now updates itself automatically.

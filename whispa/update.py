@@ -1,6 +1,6 @@
 """Auto-update: pull the latest commit from git, resync deps, relaunch.
 
-whispa is deployed by cloning a private git repo onto each machine rather
+whispa is deployed by cloning a git repo onto each machine rather
 than copying the folder by hand, so "ship a fix" means "push a commit" and
 every machine picks it up the next time it starts - no separate installer
 step, no going round to each PC.

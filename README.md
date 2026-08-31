@@ -32,16 +32,16 @@ first run only), then `ready`.
 
 To have it running from login, use the tray's **Settings → Start with Windows**.
 
-`install.bat` also turns this folder into a checkout of whispa's private git
-repo (installing Git the same way it installs Python, if needed), which is
-what lets it **update itself** afterwards — see below. The first time it does
-this you may see a GitHub sign-in window; that happens once per machine.
+`install.bat` also turns this folder into a checkout of whispa's git repo
+(installing Git the same way it installs Python, if needed), which is what
+lets it **update itself** afterwards — see below.
 
 ---
 
 ## Updating
 
-Once a machine has been through `install.bat`, that copy of whispa checks for
+whispa's source lives at [github.com/mouldimus/whispa](https://github.com/mouldimus/whispa).
+Once a machine has been through `install.bat`, that copy checks for
 a newer version every time it starts: if one is there, it pulls it, resyncs
 dependencies only if `requirements.txt` changed, and restarts itself once,
 silently — no console window, no prompt. Ship a fix by pushing to the repo;
@@ -383,11 +383,10 @@ no Windows, so it is worth being precise about which claims are backed by a run.
   unproven until you run it on a PC without Python.
 - **The git bootstrap in `install.bat`** (installing Git via winget, turning
   an existing folder-copy into a checkout with `git init` + `checkout -f`) and
-  **the self-update in `whispa/update.py`** (the git subprocess calls, the
-  GitHub credential prompt, `os.execv` relaunching `pythonw.exe`) — the update
-  logic itself is unit-tested against a fake git, but none of it has run
-  against real git, a real GitHub credential prompt, or a real Windows
-  process relaunch.
+  **the self-update in `whispa/update.py`** (the git subprocess calls,
+  `os.execv` relaunching `pythonw.exe`) — the update logic itself is
+  unit-tested against a fake git, but none of it has run against real git or
+  a real Windows process relaunch.
 - Writing to the real Windows registry. The autostart logic is tested against
   an in-memory stand-in; `winreg` itself is not exercised here.
 - **Hiding the Windows key from the Start menu** for the `Ctrl + Win` shortcut.
