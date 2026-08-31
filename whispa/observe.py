@@ -183,6 +183,9 @@ class _Tracked:
     born: float
     stable_since: float
     misses: int = 0
+    # The span has just disappeared from view - sent, deleted, or focus moved
+    # away. Whatever was last seen is taken as final without waiting.
+    vanished: bool = False
 
 
 class CorrectionWatcher:
@@ -194,7 +197,12 @@ class CorrectionWatcher:
     focused control is polled for as long as `window` seconds after each
     dictation, every recent dictation is tracked at once, and an edit is only
     reported once it has sat unchanged for `settle` seconds, so a half-typed
-    word is never mistaken for the intended one.
+    word is never mistaken for the intended one. Two exceptions keep that
+    from losing real fixes: while the document is changing the poll runs at
+    `fast_poll` rather than `poll`, so a fix is seen within a fraction of a
+    second of being typed; and when the span disappears - the message was
+    sent, the text deleted, focus moved elsewhere - the last state seen is
+    reported at once, since pressing send is as clear a "done" as a pause.
 
     Tracking is incremental: each time the span is found in a new snapshot,
     that snapshot becomes the baseline. Each tick then only has to absorb the
@@ -208,6 +216,7 @@ class CorrectionWatcher:
         settle: float = 3.0,
         window: float = 120.0,
         poll: float = 2.0,
+        fast_poll: float = 0.3,
         max_tracked: int = 6,
         anchor_timeout: float = 3.0,
         miss_limit: int = 30,
@@ -218,6 +227,7 @@ class CorrectionWatcher:
         self.settle = settle
         self.window = window
         self.poll = poll
+        self.fast_poll = fast_poll
         self.max_tracked = max_tracked
         # How long to keep looking for the pasted text before concluding the
         # control does not expose it. Pastes land asynchronously.
@@ -233,6 +243,7 @@ class CorrectionWatcher:
         self._stopped = False
         self._thread: threading.Thread | None = None
         self._last_seen: str | None = None
+        self._busy = False
         self._anchor_failed = False
         self.last_injected: str | None = None
 
@@ -278,10 +289,16 @@ class CorrectionWatcher:
                 self._tick(items)
             except Exception:
                 log.debug("correction read-back failed", exc_info=True)
-            # A paste that has not landed yet is checked again quickly; a
-            # settled document only needs a look every couple of seconds.
-            anchoring = any(item.snapshot is None for item in items)
-            self._wake.wait(min(self.poll, 0.3) if anchoring else self.poll)
+            self._wake.wait(self._interval(items))
+
+    def _interval(self, items: list[_Tracked]) -> float:
+        """A paste that has not landed yet, or a document being typed in, is
+        checked again quickly; a still document only needs a look every
+        couple of seconds."""
+        anchoring = any(item.snapshot is None for item in items)
+        if anchoring or self._busy:
+            return min(self.poll, self.fast_poll)
+        return self.poll
 
     def poll_once(self) -> None:
         """Run one polling step synchronously. For tests and diagnostics."""
@@ -300,6 +317,7 @@ class CorrectionWatcher:
         changed = after is not None and after != self._last_seen
         if after is not None:
             self._last_seen = after
+        self._busy = changed
 
         dropped: list[_Tracked] = []
         for item in items:
@@ -314,9 +332,8 @@ class CorrectionWatcher:
             if changed and not self._follow(item, after, now):
                 dropped.append(item)
                 continue
-            if (
-                item.current.strip() != item.reported.strip()
-                and now - item.stable_since >= self.settle
+            if item.current.strip() != item.reported.strip() and (
+                item.vanished or now - item.stable_since >= self.settle
             ):
                 log.debug("read-back: %r -> %r", item.reported, item.current)
                 self.on_correction(item.reported, item.current)
@@ -353,13 +370,17 @@ class CorrectionWatcher:
         if item.current and item.current in after:
             item.snapshot = after
             item.misses = 0
+            item.vanished = False
             return True
         edited = locate_edited_span(item.snapshot, after, item.current)
         if edited is None:
-            # Focus is probably on a different window right now.
+            # Sent, deleted, or focus is on a different window right now.
+            # Either way the user has finished with what was last seen.
             item.misses += 1
+            item.vanished = True
             return item.misses <= self.miss_limit
         item.misses = 0
+        item.vanished = False
         item.snapshot = after
         if edited != item.current:
             item.current = edited

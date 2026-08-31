@@ -224,14 +224,16 @@ Two things it deliberately will **not** do:
   are ignored.
 
 **How it sees your edits.** After typing, it keeps reading the focused
-control back through Windows UI Automation — every couple of seconds, for two
-minutes (`learn_watch_seconds`) — and watches what each recent dictation turns
-into. There is no deadline: read the sentence back, dictate the next one, go
-back and fix a word thirty seconds later, and it is still seen. An edit only
-counts once it has sat unchanged for a few seconds (`learn_settle_seconds`),
-so a half-typed word is never learnt as the intended one, and each fix is
-learnt exactly once. What it learns reaches the speech model straight away,
-not at the next restart.
+control back through Windows UI Automation — every couple of seconds while
+nothing is happening, several times a second while you type, for two minutes
+(`learn_watch_seconds`) — and watches what each recent dictation turns into.
+There is no deadline: read the sentence back, dictate the next one, go back
+and fix a word thirty seconds later, and it is still seen. An edit counts
+once it has sat unchanged for a few seconds (`learn_settle_seconds`), so a
+half-typed word is never learnt as the intended one — or the moment the text
+disappears, so fixing a word and hitting send straight away is fine. Each fix
+is learnt exactly once. What it learns reaches the speech model straight
+away, not at the next restart.
 
 Read-back works in most modern apps — browsers, Office, Electron apps like
 Slack and VS Code — and not in some others. Where it doesn't, the log says so
