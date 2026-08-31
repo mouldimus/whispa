@@ -109,15 +109,25 @@ class AutoUpdater:
         changed. Returns True when the checkout was updated, meaning the
         caller should relaunch to run the new code."""
         if not self.is_git_checkout():
+            # The single most useful line in the log when a machine is stuck
+            # on an old version: it was deployed as a folder copy and has no
+            # way to update until install.bat converts it.
+            log.info(
+                "%s is not a git checkout - auto-update is off. "
+                "Run install.bat once to enable it.",
+                self.root,
+            )
             return False
 
         try:
             branch = self._current_branch()
             if branch is None:
+                log.info("git is missing or this checkout is broken; skipping auto-update")
                 return False
 
             status = self.run(["git", "status", "--porcelain"], self.root, _LOCAL_TIMEOUT)
             if status.returncode != 0:
+                log.info("git status failed; skipping auto-update: %s", status.stderr.strip())
                 return False
             if not is_clean(status.stdout):
                 log.info("local changes present in %s; skipping auto-update", self.root)
@@ -127,7 +137,10 @@ class AutoUpdater:
                 ["git", "fetch", "--quiet", "origin", branch], self.root, _FETCH_TIMEOUT
             )
             if fetch.returncode != 0:
-                log.debug("update check could not reach origin: %s", fetch.stderr.strip())
+                log.info(
+                    "update check could not reach origin (offline?): %s",
+                    fetch.stderr.strip(),
+                )
                 return False
 
             count = self.run(
