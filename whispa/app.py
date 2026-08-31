@@ -77,6 +77,7 @@ class DictationEngine:
         on_state: Callable[[State, str], None] | None = None,
         learner=None,
         watcher=None,
+        on_learned=None,
         formatter: Callable[[str], str] | None = None,
     ) -> None:
         self.recorder = recorder
@@ -89,6 +90,9 @@ class DictationEngine:
         self.on_state = on_state
         self.learner = learner
         self.watcher = watcher
+        # Called after a manual correction is learnt, so whatever depends on
+        # the learner's state (the decoder prompt) can catch up.
+        self.on_learned = on_learned
         # Shapes the finished transcript into paragraphs and lists. Injected
         # rather than imported so the engine has no opinion about formatting
         # and the tests can watch exactly what gets typed.
@@ -253,7 +257,10 @@ class DictationEngine:
         """Manual correction path: 'what I actually said was ...'."""
         if self.learner is None or not self.last_injected:
             return []
-        return self.learner.observe(self.last_injected, corrected)
+        pairs = self.learner.observe(self.last_injected, corrected)
+        if pairs and self.on_learned is not None:
+            self.on_learned()
+        return pairs
 
     def wait_idle(self, timeout: float = 30.0) -> bool:
         """Block until the queue drains. Returns False on timeout."""

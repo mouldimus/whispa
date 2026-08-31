@@ -223,14 +223,6 @@ def main(argv: list[str] | None = None) -> int:
         path=default_config_dir() / "learned.json",
         min_count=cfg.learn_min_count,
     )
-    watcher = None
-    if cfg.learn_from_edits:
-        watcher = CorrectionWatcher(
-            observer=make_observer(True),
-            on_correction=learner.observe,
-            delay=cfg.learn_delay_seconds,
-        )
-
     transcriber = WhisperTranscriber(
         model=cfg.model,
         device=cfg.device,
@@ -250,6 +242,26 @@ def main(argv: list[str] | None = None) -> int:
         paragraph_pause_seconds=cfg.paragraph_pause_seconds,
         comma_pause_seconds=cfg.comma_pause_seconds,
     )
+
+    def refresh_prompt() -> None:
+        # Learnt vocabulary reaches the decoder as soon as it is learnt, not
+        # at the next restart - otherwise the second correction of the same
+        # word never had a chance to be prevented.
+        if cfg.learn_bias_prompt:
+            transcriber.initial_prompt = learner.prompt_bias(cfg.initial_prompt) or None
+
+    def learn_from_edit(original: str, corrected: str) -> None:
+        if learner.observe(original, corrected):
+            refresh_prompt()
+
+    watcher = None
+    if cfg.learn_from_edits:
+        watcher = CorrectionWatcher(
+            observer=make_observer(True),
+            on_correction=learn_from_edit,
+            settle=cfg.learn_settle_seconds,
+            window=cfg.learn_watch_seconds,
+        )
 
     injector = (
         NullInjector()
@@ -291,6 +303,7 @@ def main(argv: list[str] | None = None) -> int:
         formatter=make_formatter(cfg),
         learner=learner,
         watcher=watcher,
+        on_learned=refresh_prompt,
         on_state=lambda state, detail: _on_state(state, detail, overlay, tray_ref),
     )
 

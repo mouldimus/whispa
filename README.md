@@ -223,12 +223,22 @@ Two things it deliberately will **not** do:
   says nothing about what was misheard. Edits that change most of the words
   are ignored.
 
-**How it sees your edits.** A few seconds after typing, it reads the focused
-control back through Windows UI Automation and compares. That works in most
-modern apps — browsers, Office, Electron apps like Slack and VS Code — and not
-in some others. Where it doesn't work, use the tray's **Fix last dictation...**
-dialog: it shows what was typed, you correct it, and the lesson is identical.
-Manual corrections are trusted immediately, since you clearly meant them.
+**How it sees your edits.** After typing, it keeps reading the focused
+control back through Windows UI Automation — every couple of seconds, for two
+minutes (`learn_watch_seconds`) — and watches what each recent dictation turns
+into. There is no deadline: read the sentence back, dictate the next one, go
+back and fix a word thirty seconds later, and it is still seen. An edit only
+counts once it has sat unchanged for a few seconds (`learn_settle_seconds`),
+so a half-typed word is never learnt as the intended one, and each fix is
+learnt exactly once. What it learns reaches the speech model straight away,
+not at the next restart.
+
+Read-back works in most modern apps — browsers, Office, Electron apps like
+Slack and VS Code — and not in some others. Where it doesn't, the log says so
+(*can't read the typed text back from the focused window*), and the tray's
+**Fix last dictation...** dialog still teaches it: it shows what was typed,
+you correct it, and the lesson is identical. Manual corrections are trusted
+immediately, since you clearly meant them.
 
 Learned corrections live in `%APPDATA%\whispa\learned.json`. Delete it to
 forget everything; edit it to curate.
@@ -272,6 +282,9 @@ Run `whispa-console.bat --write-config` to create the settings file, then edit
   above.
 - `replacements` — hand-written fixes applied to every transcript, e.g.
   `{"gonna": "going to"}`. Learned corrections stack on top of these.
+- `learn_min_count`, `learn_settle_seconds`, `learn_watch_seconds` — how
+  many times a fix must repeat before it is applied, how long an edit must sit
+  still before it counts, and how long after a dictation edits are watched.
 - `initial_prompt` — a sentence of context that biases spelling. Your jargon
   and product names here is the cheapest accuracy win available; learned
   vocabulary is appended to it automatically.
@@ -338,9 +351,11 @@ speak. If the text appears in the console, transcription is fine and the
 problem is injection — try `--inject type`.
 
 **It isn't learning.** The tray menu shows the counts. If it says `0 tracked`
-after several corrections, UI Automation can't read that app; use **Fix last
+after several corrections, UI Automation can't read that app — the log will
+say *can't read the typed text back from the focused window*; use **Fix last
 dictation...** instead. Remember a correction must repeat twice before it is
-applied.
+applied (`learn_min_count: 1` if you want it to act on the first fix), and
+an edit is only counted once you have left it alone for a few seconds.
 
 **The indicator is in the way.** `--no-overlay`, or edit `overlay: false`.
 
@@ -430,7 +445,10 @@ no Windows, so it is worth being precise about which claims are backed by a run.
 - 212 unit tests. Hotkey matching including every hybrid tap/hold/latch
   transition with a fake clock; correction extraction and its refusal to learn
   from rewrites; span location under edits elsewhere in the document and in a
-  30,000-character document; learner persistence, conflicts and thresholds;
+  30,000-character document; the read-back watcher with a fake clock - late
+  edits, half-typed words, a paste that lands late, a second dictation not
+  cancelling the first, switching windows and back, each fix learnt once;
+  learner persistence, conflicts and thresholds;
   level-meter mapping (silence really does read as silence); indicator
   visibility rules; injector clipboard restore and held-modifier waiting;
   engine edge cases; corrupt-config fallback; the autostart toggle including

@@ -1,8 +1,9 @@
 """Noticing that you fixed something.
 
-After text is injected we read the focused control back a few seconds later and
-compare. Whatever the injected span has *become* is what you meant; the
-difference is the training signal `learn.py` consumes.
+After text is injected we keep reading the focused control back for a while
+and compare. Whatever the injected span has *become*, once you stop editing
+it, is what you meant; the difference is the training signal `learn.py`
+consumes.
 
 Reading arbitrary application text needs Windows UI Automation, which works in
 most modern apps (browsers, Office, Electron apps like Slack and VS Code) and
@@ -22,6 +23,8 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
+from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import Callable, Protocol
 
@@ -164,69 +167,216 @@ class UIAObserver:
             return None
 
 
-class CorrectionWatcher:
-    """Schedules the read-back and hands any correction to a callback.
+@dataclass
+class _Tracked:
+    """One dictation still being watched for edits."""
 
-    Each new dictation cancels the pending check for the previous one: if you
-    are dictating quickly, the older span has probably scrolled out of the
-    control anyway, and a stale comparison is worse than no comparison.
+    injected: str
+    # What the span looked like the last time it was handed to the callback;
+    # the next report diffs against this, so each fix is learnt exactly once.
+    reported: str
+    # What the span looks like in the latest snapshot it was found in.
+    current: str
+    # The document that `current` was located in, or None until the pasted
+    # text has been seen to land.
+    snapshot: str | None
+    born: float
+    stable_since: float
+    misses: int = 0
+
+
+class CorrectionWatcher:
+    """Keeps watching recent dictations and reports what each one becomes.
+
+    People do not fix a mishearing on a fixed schedule: they read the sentence
+    back, dictate the next one, then go back and change a word - or fix it
+    thirty seconds later. So rather than one read-back at a fixed delay, the
+    focused control is polled for as long as `window` seconds after each
+    dictation, every recent dictation is tracked at once, and an edit is only
+    reported once it has sat unchanged for `settle` seconds, so a half-typed
+    word is never mistaken for the intended one.
+
+    Tracking is incremental: each time the span is found in a new snapshot,
+    that snapshot becomes the baseline. Each tick then only has to absorb the
+    last couple of seconds of typing, wherever in the document it happened.
     """
 
     def __init__(
         self,
         observer: TextObserver,
         on_correction: Callable[[str, str], None],
-        delay: float = 6.0,
+        settle: float = 3.0,
+        window: float = 120.0,
+        poll: float = 2.0,
+        max_tracked: int = 6,
+        anchor_timeout: float = 3.0,
+        miss_limit: int = 30,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.observer = observer
         self.on_correction = on_correction
-        self.delay = delay
-        self._timer: threading.Timer | None = None
+        self.settle = settle
+        self.window = window
+        self.poll = poll
+        self.max_tracked = max_tracked
+        # How long to keep looking for the pasted text before concluding the
+        # control does not expose it. Pastes land asynchronously.
+        self.anchor_timeout = anchor_timeout
+        # Consecutive changed snapshots the span could not be found in before
+        # a dictation is given up on. Generous, so alt-tabbing away to type
+        # something else and coming back to fix the sentence still works.
+        self.miss_limit = miss_limit
+        self._clock = clock
+        self._items: list[_Tracked] = []
         self._lock = threading.Lock()
+        self._wake = threading.Event()
+        self._stopped = False
+        self._thread: threading.Thread | None = None
+        self._last_seen: str | None = None
+        self._anchor_failed = False
         self.last_injected: str | None = None
 
     @property
     def available(self) -> bool:
         return bool(getattr(self.observer, "available", False))
 
+    @property
+    def tracking(self) -> int:
+        with self._lock:
+            return len(self._items)
+
     def note_injection(self, injected: str) -> None:
         """Call immediately after text lands in the target window."""
         self.last_injected = injected
-        if not self.available:
+        if not self.available or not injected or not injected.strip():
             return
-        before = self.observer.snapshot()
-        if before is None or injected not in before:
-            # The control does not expose its text, or the paste has not landed
-            # yet. Either way there is nothing dependable to compare against.
-            log.debug("no usable read-back anchor for this control")
+        now = self._clock()
+        with self._lock:
+            self._items.append(_Tracked(injected, injected, injected, None, now, now))
+            del self._items[: -self.max_tracked]
+            self._stopped = False
+            if self._thread is None or not self._thread.is_alive():
+                self._thread = threading.Thread(
+                    target=self._run, name="whispa-readback", daemon=True
+                )
+                self._thread.start()
+        self._wake.set()
+
+    # --- polling ------------------------------------------------------------
+
+    def _run(self) -> None:
+        while True:
+            # Cleared before the tick, so a dictation that arrives during the
+            # tick still cuts the wait short rather than being missed.
+            self._wake.clear()
+            with self._lock:
+                if self._stopped or not self._items:
+                    self._thread = None
+                    return
+                items = list(self._items)
+            try:
+                self._tick(items)
+            except Exception:
+                log.debug("correction read-back failed", exc_info=True)
+            # A paste that has not landed yet is checked again quickly; a
+            # settled document only needs a look every couple of seconds.
+            anchoring = any(item.snapshot is None for item in items)
+            self._wake.wait(min(self.poll, 0.3) if anchoring else self.poll)
+
+    def poll_once(self) -> None:
+        """Run one polling step synchronously. For tests and diagnostics."""
+        with self._lock:
+            items = list(self._items)
+        self._tick(items)
+
+    def _tick(self, items: list[_Tracked]) -> None:
+        now = self._clock()
+        after = self.observer.snapshot()
+        expired = [item for item in items if now - item.born > self.window]
+        self._drop(expired)
+        # None means the focused control cannot be read right now (focus has
+        # moved to a window UIA cannot see into). Nothing new can be observed,
+        # but an edit already seen still settles and gets reported.
+        changed = after is not None and after != self._last_seen
+        if after is not None:
+            self._last_seen = after
+
+        dropped: list[_Tracked] = []
+        for item in items:
+            if item in expired:
+                continue
+            if item.snapshot is None:
+                if after is not None and not self._anchor(item, after, now):
+                    dropped.append(item)
+                elif after is None and now - item.born >= self.anchor_timeout:
+                    dropped.append(item)
+                continue
+            if changed and not self._follow(item, after, now):
+                dropped.append(item)
+                continue
+            if (
+                item.current.strip() != item.reported.strip()
+                and now - item.stable_since >= self.settle
+            ):
+                log.debug("read-back: %r -> %r", item.reported, item.current)
+                self.on_correction(item.reported, item.current)
+                item.reported = item.current
+        self._drop(dropped)
+
+    def _anchor(self, item: _Tracked, after: str, now: float) -> bool:
+        """Wait for the pasted text to show up in the control.
+
+        Returns False once it is clear this control will not show it.
+        """
+        for candidate in (item.injected, item.injected.strip()):
+            if candidate and candidate in after:
+                item.snapshot = after
+                item.current = item.reported = candidate
+                item.stable_since = now
+                if self._anchor_failed:
+                    self._anchor_failed = False
+                    log.info("read-back working again in the focused window")
+                return True
+        if now - item.born < self.anchor_timeout:
+            return True
+        if not self._anchor_failed:
+            self._anchor_failed = True
+            log.info(
+                "can't read the typed text back from the focused window, so "
+                "edits made here won't be learnt (the tray's 'Fix last "
+                "dictation...' still works)"
+            )
+        return False
+
+    def _follow(self, item: _Tracked, after: str, now: float) -> bool:
+        """Re-locate the span in a changed document. False = give up on it."""
+        if item.current and item.current in after:
+            item.snapshot = after
+            item.misses = 0
+            return True
+        edited = locate_edited_span(item.snapshot, after, item.current)
+        if edited is None:
+            # Focus is probably on a different window right now.
+            item.misses += 1
+            return item.misses <= self.miss_limit
+        item.misses = 0
+        item.snapshot = after
+        if edited != item.current:
+            item.current = edited
+            item.stable_since = now
+        return True
+
+    def _drop(self, items: list[_Tracked]) -> None:
+        if not items:
             return
         with self._lock:
-            if self._timer is not None:
-                self._timer.cancel()
-            self._timer = threading.Timer(
-                self.delay, self._check, args=(before, injected)
-            )
-            self._timer.daemon = True
-            self._timer.start()
-
-    def _check(self, before: str, injected: str) -> None:
-        try:
-            after = self.observer.snapshot()
-            if after is None or after == before:
-                return
-            edited = locate_edited_span(before, after, injected)
-            if edited is None or edited.strip() == injected.strip():
-                return
-            log.debug("read-back: %r -> %r", injected, edited)
-            self.on_correction(injected, edited)
-        except Exception:
-            log.debug("correction read-back failed", exc_info=True)
+            self._items = [i for i in self._items if i not in items]
 
     def cancel(self) -> None:
         with self._lock:
-            if self._timer is not None:
-                self._timer.cancel()
-                self._timer = None
+            self._items = []
+            self._stopped = True
+        self._wake.set()
 
 
 def make_observer(enabled: bool) -> TextObserver:

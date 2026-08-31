@@ -117,9 +117,11 @@ class Config:
     # --- learning -----------------------------------------------------------
     # Read the focused control back after injecting and learn from any edits.
     learn_from_edits: bool = True
-    # How long to wait before reading back. Long enough to finish a sentence
-    # and fix it, short enough that the text is still on screen.
-    learn_delay_seconds: float = 6.0
+    # An edit must sit unchanged this long before it counts as finished -
+    # otherwise a half-typed word would be learnt as the intended one.
+    learn_settle_seconds: float = 3.0
+    # How long after a dictation its text is still watched for edits.
+    learn_watch_seconds: float = 120.0
     # How many times a correction must repeat before it is applied
     # automatically. 1 would act on a single change of mind.
     learn_min_count: int = 2
@@ -192,10 +194,15 @@ class Config:
         a code update should give it the new default too, the same as it would
         for someone with no config file at all.
         """
+        changed = False
         if raw.get("hotkey_mode") == "hold" and "tap_seconds" not in raw:
             raw["hotkey_mode"] = "hybrid"
-            return True
-        return False
+            changed = True
+        # v5.1 replaced the single fixed read-back delay with continuous
+        # watching; the old knob has no equivalent, so it is simply dropped.
+        if raw.pop("learn_delay_seconds", None) is not None:
+            changed = True
+        return changed
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "Config":
@@ -232,8 +239,10 @@ class Config:
             problems.append("comma_pause_seconds must be >= 0")
         if self.learn_min_count < 1:
             problems.append("learn_min_count must be >= 1")
-        if self.learn_delay_seconds <= 0:
-            problems.append("learn_delay_seconds must be > 0")
+        if self.learn_settle_seconds <= 0:
+            problems.append("learn_settle_seconds must be > 0")
+        if self.learn_watch_seconds <= 0:
+            problems.append("learn_watch_seconds must be > 0")
         if self.inject_method not in ("paste", "type", "clipboard"):
             problems.append(
                 f"inject_method must be 'paste', 'type' or 'clipboard', got {self.inject_method!r}"
