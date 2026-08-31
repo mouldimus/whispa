@@ -204,6 +204,22 @@ def _ends_with_punctuation(text: str) -> bool:
     return bool(stripped) and stripped[-1] in ".,;:!?"
 
 
+# A pause earns a comma only when what follows starts a new clause. Real
+# hesitations are usually word-search pauses in the *middle* of a phrase
+# ("and then back ... to New Jersey"), where a comma is exactly wrong; tested
+# against real interview speech, gating on these connectives kept every
+# correct insertion and dropped every bad one.
+_COMMA_CONNECTIVES = frozenset(
+    "and but or so then because which who when where while though although "
+    "however also okay well now".split()
+)
+
+
+def _starts_new_clause(piece: str) -> bool:
+    first = piece.split(None, 1)[0].strip(".,;:!?\"'").lower() if piece.split() else ""
+    return first in _COMMA_CONNECTIVES
+
+
 def join_segments(
     segments: list[Segment] | list,
     pause_seconds: float = 1.0,
@@ -212,10 +228,12 @@ def join_segments(
     """Join decoded segments, marking a paragraph break at every long pause.
 
     A shorter pause than that - real, but not paragraph-length - gets a comma
-    instead, if the segment before it doesn't already end with one. Measured
-    against real audio, whisper reliably drops the comma it would otherwise
-    write once a gap gets past about a second, and a plain word-join at that
-    point runs two clauses together with nothing to mark the pause at all.
+    instead, if the segment before it doesn't already end with one and the
+    next word actually starts a new clause. Measured against real audio,
+    whisper reliably drops the comma it would otherwise write once a gap gets
+    past about a second - but a hesitation mid-phrase gets the same length of
+    silence with no comma warranted, which is what the connective gate is
+    for.
     """
     parts: list[str] = []
     previous_end: float | None = None
@@ -230,7 +248,12 @@ def join_segments(
             # VAD boundaries; treat it as no pause rather than a break.
             if pause_seconds > 0 and gap >= pause_seconds:
                 sep = PARA_MARK
-            elif comma_seconds > 0 and gap >= comma_seconds and not _ends_with_punctuation(parts[-1]):
+            elif (
+                comma_seconds > 0
+                and gap >= comma_seconds
+                and not _ends_with_punctuation(parts[-1])
+                and _starts_new_clause(piece)
+            ):
                 sep = ", "
             else:
                 sep = " "

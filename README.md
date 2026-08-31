@@ -136,15 +136,16 @@ catching yourself mid-sentence. whispa cleans up three of these by default:
 
 Turn all three off with `remove_disfluencies: false`.
 
-**A shorter pause can also imply a comma**, off by default. Measured against
-real audio, whisper reliably drops the comma it would otherwise write once a
-pause gets past about a second — but an *ordinary* rhetorical pause in fluent
-speech runs about that long too, with no comma warranted at all (the same
-reason `paragraph_pause_seconds` below 1.5s starts breaking mid-thought, a
-few lines up). So `comma_pause_seconds` ships at `0` — it isn't a safe
-universal default — but is worth trying (say `0.8`) if your own dictation
-tends to pause exactly where a comma belongs; watch the log for a run of
-false ones before trusting it.
+**A shorter pause also implies a comma — but only before a new clause.**
+Measured against real audio, whisper reliably drops the comma it would
+otherwise write once a pause gets past about a second. The catch, measured
+against real interview speech: a *word-search* hesitation pauses just as
+long mid-phrase ("and then back … to New Jersey"), where a comma is exactly
+wrong. So the comma only lands when the pause is at least
+`comma_pause_seconds` (default `0.8`) **and** the next word starts a new
+clause — "and", "but", "so", "because", "which" and friends. On the test
+material that gate removed every wrong insertion and kept every right one.
+Set `comma_pause_seconds: 0` to turn it off.
 
 ### The indicator
 
@@ -403,8 +404,19 @@ no Windows, so it is worth being precise about which claims are backed by a run.
   a 0.4-0.7s gap and was dropped at 1.0s+, which is why the feature exists -
   and the same test also reproduced a genuine ~1.1s rhetorical pause already
   present in the *unspliced* recording with no comma warranted there at all,
-  which is why it ships off.
-- 204 unit tests. Hotkey matching including every hybrid tap/hold/latch
+  which is why the connective gate exists.
+- **The whole formatting pipeline against ~6 minutes of real unscripted
+  interview speech** (three archive.org oral-history recordings - three
+  different speakers, decades apart in recording quality), decoded with the
+  real model under four configurations and diffed. This is what proved the
+  stutter collapse on genuine stutters ("we lived in, we lived in Trenton" ->
+  "we lived in Trenton") and no-op behaviour on the fluent speaker; that
+  ungated pause-commas mangle hesitant speech ("back, to New Jersey",
+  "anybody, else's") even at 1.2s; and that the connective gate removes
+  every one of those while keeping the correct insertions. It also showed
+  `base.en` mostly drops "um"/"uh" on its own, so the filler stripping is
+  insurance for models that don't.
+- 205 unit tests. Hotkey matching including every hybrid tap/hold/latch
   transition with a fake clock; correction extraction and its refusal to learn
   from rewrites; span location under edits elsewhere in the document and in a
   30,000-character document; learner persistence, conflicts and thresholds;

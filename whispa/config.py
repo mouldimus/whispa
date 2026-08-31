@@ -89,13 +89,13 @@ class Config:
     paragraph_pause_seconds: float = 2.0
     # A shorter pause than that, where whisper still tends to drop the comma
     # it would otherwise have written (measured against real audio: a
-    # 1.0-1.5s gap loses it, a 0.4-0.7s one doesn't). Off by default: the same
-    # measurement also found an ordinary rhetorical pause of about a second
-    # in fluent speech with no grammatical comma there at all, so a length
-    # this short is not a safe universal signal - it will occasionally insert
-    # a comma where none belongs. Worth trying if your own dictation tends to
-    # pause where a comma *should* go; watch the log if you turn it on.
-    comma_pause_seconds: float = 0.0
+    # 1.0-1.5s gap loses it, a 0.4-0.7s one doesn't). The comma only lands
+    # when the next word starts a new clause ("and", "but", "so", "which",
+    # ...) - a hesitation mid-phrase gets the same silence with no comma
+    # warranted, and that gate removed every wrong insertion in testing
+    # against real interview speech while keeping the right ones. 0 turns it
+    # off.
+    comma_pause_seconds: float = 0.8
     # Honour spoken structure commands. See whispa/format.py for the list.
     voice_commands: bool = True
     # Extra or overriding commands, e.g. {"full stop": ".", "new section":

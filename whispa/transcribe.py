@@ -59,7 +59,7 @@ class WhisperTranscriber:
         initial_prompt: str = "",
         sample_rate: int = 16000,
         paragraph_pause_seconds: float = 2.0,
-        comma_pause_seconds: float = 0.0,
+        comma_pause_seconds: float = 0.8,
     ) -> None:
         self.model_name = model
         self.device = device
@@ -74,9 +74,9 @@ class WhisperTranscriber:
         # turns pause-based paragraphing off.
         self.paragraph_pause_seconds = paragraph_pause_seconds
         # A shorter pause than that, where whisper still tends to drop the
-        # comma it would otherwise have written. Off (0) by default - see the
-        # comment on Config.comma_pause_seconds for why a length this short
-        # isn't a safe universal signal.
+        # comma it would otherwise have written. Only fires when the next
+        # word starts a new clause - see join_segments and the comment on
+        # Config.comma_pause_seconds. 0 turns it off.
         self.comma_pause_seconds = comma_pause_seconds
         self._model = None
 
