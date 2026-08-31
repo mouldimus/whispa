@@ -8,6 +8,7 @@ with --no-tray if pystray misbehaves, which it sometimes does on Windows.
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Callable
 
 from . import __version__
@@ -50,6 +51,7 @@ class TrayIcon:
         on_open_console: Callable[[], None] | None = None,
         autostart=None,
         on_set_hotkey: Callable[[str], None] | None = None,
+        on_update_now: Callable[[], str] | None = None,
     ) -> None:
         self.hotkey = hotkey
         self.model = model
@@ -60,8 +62,13 @@ class TrayIcon:
         self.on_open_console = on_open_console
         self.autostart = autostart
         self.on_set_hotkey = on_set_hotkey
+        # Returns a short status string; runs a git pull, so it is called on
+        # its own thread and guarded against a double click.
+        self.on_update_now = on_update_now
         self._icon = None
         self._status = "ready"
+        self._updating = False
+        self._update_thread: threading.Thread | None = None
 
     def _usage_hint(self, _item=None) -> str:
         label = preset_label(self.hotkey)
@@ -161,6 +168,8 @@ class TrayIcon:
             entries.append(
                 pystray.MenuItem("Open debug console...", self._open_console)
             )
+        if self.on_update_now is not None:
+            entries.append(pystray.MenuItem("Update now", self._update_now))
         if self.autostart is not None and self.autostart.available:
             entries.append(
                 pystray.MenuItem(
@@ -170,6 +179,41 @@ class TrayIcon:
                 )
             )
         return pystray.Menu(*entries) if entries else None
+
+    def _update_now(self, _icon=None, _item=None) -> None:
+        """Pull from the repo on demand, on a worker thread.
+
+        The status line doubles as the progress indicator: "checking..."
+        while the pull runs, then whatever the callback reports. A second
+        click while one is in flight is ignored rather than queued.
+        """
+        if self.on_update_now is None or self._updating:
+            return
+        self._updating = True
+        self._status = "checking for updates..."
+        self._refresh_menu()
+
+        def run() -> None:
+            try:
+                self._status = self.on_update_now() or "up to date"
+            except Exception:
+                log.exception("update check failed")
+                self._status = "update failed - see log"
+            finally:
+                self._updating = False
+                self._refresh_menu()
+
+        self._update_thread = threading.Thread(
+            target=run, name="whispa-update", daemon=True
+        )
+        self._update_thread.start()
+
+    def _refresh_menu(self) -> None:
+        if self._icon is not None:
+            try:
+                self._icon.update_menu()
+            except Exception:
+                log.debug("tray menu refresh failed", exc_info=True)
 
     def _autostart_checked(self) -> bool:
         try:

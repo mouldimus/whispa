@@ -347,6 +347,24 @@ def main(argv: list[str] | None = None) -> int:
             log.exception("shortcut changed but could not be saved")
         log.info("shortcut is now %s", spec)
 
+    def update_now() -> str:
+        """The tray's "Update now": pull, and restart into the new version.
+
+        Deliberately ignores cfg.auto_update - that flag governs the silent
+        check at startup, and clicking the button is as explicit as consent
+        gets. Restarting is spawn-then-quit rather than exec: the overlay,
+        tray and hotkey listener are all live, so the clean path out is the
+        normal shutdown with a fresh process already on its way up.
+        """
+        from .update import check_and_apply, spawn_replacement
+
+        if not check_and_apply():
+            return "already up to date (log has details if that seems wrong)"
+        if spawn_replacement():
+            quit_everything()
+            return "updated - restarting"
+        return "updated - restart whispa to finish"
+
     tray = None
     if not args.no_tray:
         try:
@@ -362,6 +380,7 @@ def main(argv: list[str] | None = None) -> int:
                 on_open_console=open_console if overlay is not None else None,
                 autostart=autostart,
                 on_set_hotkey=set_hotkey,
+                on_update_now=update_now,
             )
             tray_ref[0] = tray
         except Exception:

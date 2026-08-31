@@ -178,7 +178,40 @@ def check_and_apply(root: Path | None = None) -> bool:
 
 def relaunch() -> None:
     """Re-exec this process so the just-pulled code runs immediately,
-    instead of waiting for the next manual start."""
+    instead of waiting for the next manual start.
+
+    Only safe at startup, before the overlay, tray and hotkey exist - a
+    running instance restarts via spawn_replacement() plus a normal quit
+    instead.
+    """
     log.info("relaunching to run the updated version")
     logging.shutdown()
     os.execv(sys.executable, [sys.executable] + sys.argv)
+
+
+def spawn_replacement(popen=None) -> bool:
+    """Start a fresh whispa process, for restarting after a mid-run update.
+
+    The caller quits this instance once the new one is launched. The two
+    overlap for a moment, which is harmless - the newcomer spends its first
+    seconds loading the model while this one tears down. Prefers the .vbs
+    launcher for the same reason autostart does: it sets its own working
+    directory and opens no window.
+    """
+    popen = popen or subprocess.Popen
+    root = project_root()
+    vbs = root / "whispa-silent.vbs"
+    try:
+        if sys.platform == "win32" and vbs.exists():
+            popen(["wscript.exe", str(vbs)], cwd=str(root), close_fds=True)
+        else:
+            popen(
+                [sys.executable, "-m", "whispa"] + sys.argv[1:],
+                cwd=str(root),
+                close_fds=True,
+            )
+        log.info("replacement process started")
+        return True
+    except Exception:
+        log.exception("could not start the replacement process")
+        return False

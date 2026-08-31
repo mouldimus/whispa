@@ -53,6 +53,12 @@ already there — this is best-effort and never blocks startup. Turn it off
 per-machine with `auto_update: false` in `config.json` if one machine needs to
 stay pinned to a version.
 
+There is also a button: **tray → Settings → Update now** pulls immediately
+and, if anything new landed, restarts whispa into it — no waiting for the
+next launch. The status line in the menu shows how it went. The button works
+even when `auto_update` is off, since clicking it is as explicit as consent
+gets.
+
 ---
 
 ## Dictating
@@ -183,13 +189,18 @@ which one is live. Changing it takes effect on the next keypress and survives a
 restart. If the shortcut in your `config.json` isn't one of the eight, it stays
 in the list as its own entry, so trying a preset is never a one-way door.
 
+**Update now** — pulls the latest version from the repo immediately and, if
+anything new landed, restarts whispa into it. See *Updating* above. The
+status line at the top of the menu shows the outcome ("checking for
+updates...", "updated - restarting", "already up to date").
+
 **Start with Windows** — a checkbox. On, whispa starts at login; off, it
 doesn't. It writes a single value to your own `HKCU\...\CurrentVersion\Run`
 key, so it needs no admin rights and turning it off removes it completely. If
 you move the whispa folder later, it notices the entry points at the old place
 and re-points it on next start rather than quietly failing every morning.
 
-Both are also available without the tray:
+The console and autostart are also available without the tray:
 
 ```
 whispa-console.bat --autostart on      (or off, or status)
@@ -416,7 +427,7 @@ no Windows, so it is worth being precise about which claims are backed by a run.
   every one of those while keeping the correct insertions. It also showed
   `base.en` mostly drops "um"/"uh" on its own, so the filler stripping is
   insurance for models that don't.
-- 205 unit tests. Hotkey matching including every hybrid tap/hold/latch
+- 212 unit tests. Hotkey matching including every hybrid tap/hold/latch
   transition with a fake clock; correction extraction and its refusal to learn
   from rewrites; span location under edits elsewhere in the document and in a
   30,000-character document; learner persistence, conflicts and thresholds;
@@ -448,9 +459,11 @@ no Windows, so it is worth being precise about which claims are backed by a run.
 - **The git bootstrap in `install.bat`** (installing Git via winget, turning
   an existing folder-copy into a checkout with `git init` + `checkout -f`) and
   **the self-update in `whispa/update.py`** (the git subprocess calls,
-  `os.execv` relaunching `pythonw.exe`) — the update logic itself is
-  unit-tested against a fake git, but none of it has run against real git or
-  a real Windows process relaunch.
+  `os.execv` relaunching `pythonw.exe` at startup, and the tray's Update now
+  spawning a replacement via `whispa-silent.vbs` before quitting) — the
+  update logic itself is unit-tested against a fake git and a fake process
+  launcher, but none of it has run against real git or a real Windows
+  process relaunch.
 - Writing to the real Windows registry. The autostart logic is tested against
   an in-memory stand-in; `winreg` itself is not exercised here.
 - **`remove_disfluencies` against whisper's actual output for real filler
