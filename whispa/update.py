@@ -22,7 +22,9 @@ from typing import Callable, NamedTuple, Protocol
 
 log = logging.getLogger(__name__)
 
-_FETCH_TIMEOUT = 8
+# A cold fetch on Windows can spend a while in the credential helper and
+# TLS handshake before any bytes move; 8s proved too tight.
+_FETCH_TIMEOUT = 20
 _LOCAL_TIMEOUT = 5
 _PULL_TIMEOUT = 20
 _PIP_TIMEOUT = 300
@@ -32,6 +34,20 @@ class CommandResult(NamedTuple):
     returncode: int
     stdout: str
     stderr: str
+
+
+class Outcome(NamedTuple):
+    """What an update check did, and a one-line reason fit for the tray.
+
+    Every way the check can stop short has a distinct message: "already up
+    to date" for a real no-op, and something actionable otherwise - "run
+    install.bat", "offline?", "local edits" - because a button that answers
+    "up to date" when it actually skipped is indistinguishable from a broken
+    one.
+    """
+
+    updated: bool
+    message: str
 
 
 class CommandRunner(Protocol):
@@ -72,6 +88,10 @@ def is_clean(status_output: str) -> bool:
     A machine with edits in the working tree - someone poking at config
     defaults, say - must not have them silently overwritten or a pull
     silently refused halfway through; skip the update entirely instead.
+
+    The status is taken with --untracked-files=no: a stray file someone
+    dropped in the folder (a log, a note, a leftover from a folder-copy
+    install) is not an edit and does not stop a fast-forward pull.
     """
     return status_output.strip() == ""
 
@@ -108,6 +128,10 @@ class AutoUpdater:
         """Fetch, fast-forward if behind, resync dependencies if they
         changed. Returns True when the checkout was updated, meaning the
         caller should relaunch to run the new code."""
+        return self.check().updated
+
+    def check(self) -> Outcome:
+        """check_and_apply, with the reason it stopped where it did."""
         if not self.is_git_checkout():
             # The single most useful line in the log when a machine is stuck
             # on an old version: it was deployed as a folder copy and has no
@@ -117,21 +141,29 @@ class AutoUpdater:
                 "Run install.bat once to enable it.",
                 self.root,
             )
-            return False
+            return Outcome(False, "not a git checkout - run install.bat once to enable updates")
 
         try:
             branch = self._current_branch()
             if branch is None:
                 log.info("git is missing or this checkout is broken; skipping auto-update")
-                return False
+                return Outcome(False, "git not found, or the checkout is broken - see log")
 
-            status = self.run(["git", "status", "--porcelain"], self.root, _LOCAL_TIMEOUT)
+            status = self.run(
+                ["git", "status", "--porcelain", "--untracked-files=no"],
+                self.root,
+                _LOCAL_TIMEOUT,
+            )
             if status.returncode != 0:
                 log.info("git status failed; skipping auto-update: %s", status.stderr.strip())
-                return False
+                return Outcome(False, "git status failed - see log")
             if not is_clean(status.stdout):
-                log.info("local changes present in %s; skipping auto-update", self.root)
-                return False
+                log.info(
+                    "local changes present in %s; skipping auto-update:\n%s",
+                    self.root,
+                    status.stdout.strip(),
+                )
+                return Outcome(False, "local edits in the whispa folder - update skipped")
 
             fetch = self.run(
                 ["git", "fetch", "--quiet", "origin", branch], self.root, _FETCH_TIMEOUT
@@ -141,16 +173,19 @@ class AutoUpdater:
                     "update check could not reach origin (offline?): %s",
                     fetch.stderr.strip(),
                 )
-                return False
+                return Outcome(False, "couldn't reach GitHub - offline?")
 
             count = self.run(
                 ["git", "rev-list", f"HEAD..origin/{branch}", "--count"],
                 self.root,
                 _LOCAL_TIMEOUT,
             )
-            behind = parse_behind_count(count.stdout) if count.returncode == 0 else None
+            if count.returncode != 0:
+                log.info("could not compare with origin/%s: %s", branch, count.stderr.strip())
+                return Outcome(False, "couldn't compare with GitHub - see log")
+            behind = parse_behind_count(count.stdout)
             if not behind:
-                return False
+                return Outcome(False, "already up to date")
 
             req_before = self._requirements_text()
             pull = self.run(
@@ -160,15 +195,15 @@ class AutoUpdater:
             )
             if pull.returncode != 0:
                 log.warning("update pull failed, staying on the current version: %s", pull.stderr.strip())
-                return False
+                return Outcome(False, "update failed to apply - see log")
 
             log.info("updated %d commit(s) from origin/%s", behind, branch)
             if self._requirements_text() != req_before:
                 self._sync_dependencies()
-            return True
+            return Outcome(True, f"updated ({behind} commit{'s' if behind != 1 else ''})")
         except Exception:
             log.warning("auto-update check failed", exc_info=True)
-            return False
+            return Outcome(False, "update check crashed - see log")
 
     def _sync_dependencies(self) -> None:
         python = self.root / ".venv" / "Scripts" / "python.exe"

@@ -369,13 +369,21 @@ def main(argv: list[str] | None = None) -> int:
         tray and hotkey listener are all live, so the clean path out is the
         normal shutdown with a fresh process already on its way up.
         """
-        from .update import check_and_apply, spawn_replacement
+        from .update import AutoUpdater, spawn_replacement
 
-        if not check_and_apply():
-            return "already up to date (log has details if that seems wrong)"
+        # The tray menu closes the moment it is clicked, so the pill is the
+        # only feedback the user actually sees; pinned while the check runs.
+        if overlay is not None:
+            overlay.set_state(State.TRANSCRIBING, "checking for updates...", force=True)
+        outcome = AutoUpdater().check()
+        if not outcome.updated:
+            _on_state(State.IDLE, outcome.message, overlay, tray_ref)
+            return outcome.message
         if spawn_replacement():
+            _on_state(State.IDLE, "updated - restarting", overlay, tray_ref)
             quit_everything()
             return "updated - restarting"
+        _on_state(State.ERROR, "updated - restart whispa to finish", overlay, tray_ref)
         return "updated - restart whispa to finish"
 
     tray = None

@@ -47,17 +47,20 @@ dependencies only if `requirements.txt` changed, and restarts itself once,
 silently — no console window, no prompt. Ship a fix by pushing to the repo;
 every machine picks it up the next time someone dictates something.
 
-If a machine is offline, has local edits sitting in the folder, or was never
+If a machine is offline, has edited files sitting in the folder, or was never
 converted to a git checkout, it just starts normally on whatever version is
-already there — this is best-effort and never blocks startup. Turn it off
-per-machine with `auto_update: false` in `config.json` if one machine needs to
-stay pinned to a version.
+already there — this is best-effort and never blocks startup. (Stray extra
+files in the folder don't count as edits and don't block it.) The log says
+which of those it was. Turn it off per-machine with `auto_update: false` in
+`config.json` if one machine needs to stay pinned to a version.
 
 There is also a button: **tray → Settings → Update now** pulls immediately
 and, if anything new landed, restarts whispa into it — no waiting for the
-next launch. The status line in the menu shows how it went. The button works
-even when `auto_update` is off, since clicking it is as explicit as consent
-gets.
+next launch. The on-screen pill shows how it went, and if it couldn't update
+it says why: *not a git checkout - run install.bat*, *couldn't reach GitHub*,
+*local edits in the whispa folder*, or plain *already up to date*. The button
+works even when `auto_update` is off, since clicking it is as explicit as
+consent gets.
 
 ---
 
@@ -191,8 +194,9 @@ in the list as its own entry, so trying a preset is never a one-way door.
 
 **Update now** — pulls the latest version from the repo immediately and, if
 anything new landed, restarts whispa into it. See *Updating* above. The
-status line at the top of the menu shows the outcome ("checking for
-updates...", "updated - restarting", "already up to date").
+on-screen pill (and the status line at the top of the menu) shows the
+outcome: "checking for updates...", "updated - restarting", "already up to
+date", or the reason it couldn't.
 
 **Start with Windows** — a checkbox. On, whispa starts at login; off, it
 doesn't. It writes a single value to your own `HKCU\...\CurrentVersion\Run`
