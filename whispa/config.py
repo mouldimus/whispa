@@ -172,10 +172,30 @@ class Config:
             return cls(), f"could not read {path} ({exc}); using defaults"
         if not isinstance(raw, dict):
             return cls(), f"{path} must contain a JSON object; using defaults"
+        migrated = cls._migrate(raw)
         try:
-            return cls.from_dict(raw), None
+            cfg = cls.from_dict(raw)
         except (TypeError, ValueError) as exc:
             return cls(), f"{path} has unusable values ({exc}); using defaults"
+        if migrated:
+            cfg.save(path)
+        return cfg, None
+
+    @staticmethod
+    def _migrate(raw: dict[str, Any]) -> bool:
+        """Upgrade an old config dict in place. Returns True if it changed.
+
+        `tap_seconds` shipped in the same release as hybrid mode. A file with
+        `hotkey_mode: "hold"` but no `tap_seconds` predates that release, so
+        "hold" there is just the old default baked into the file, not a
+        deliberate choice made from a menu that also offered "hybrid" - pulling
+        a code update should give it the new default too, the same as it would
+        for someone with no config file at all.
+        """
+        if raw.get("hotkey_mode") == "hold" and "tap_seconds" not in raw:
+            raw["hotkey_mode"] = "hybrid"
+            return True
+        return False
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "Config":
