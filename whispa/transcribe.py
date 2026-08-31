@@ -59,6 +59,7 @@ class WhisperTranscriber:
         initial_prompt: str = "",
         sample_rate: int = 16000,
         paragraph_pause_seconds: float = 2.0,
+        comma_pause_seconds: float = 0.0,
     ) -> None:
         self.model_name = model
         self.device = device
@@ -72,6 +73,11 @@ class WhisperTranscriber:
         # A silence this long between two segments is a paragraph break; 0
         # turns pause-based paragraphing off.
         self.paragraph_pause_seconds = paragraph_pause_seconds
+        # A shorter pause than that, where whisper still tends to drop the
+        # comma it would otherwise have written. Off (0) by default - see the
+        # comment on Config.comma_pause_seconds for why a length this short
+        # isn't a safe universal signal.
+        self.comma_pause_seconds = comma_pause_seconds
         self._model = None
 
     @property
@@ -101,6 +107,7 @@ class WhisperTranscriber:
             self.transcribe(silence)
         except Exception:  # pragma: no cover - warmup must never be fatal
             log.debug("warmup transcription failed", exc_info=True)
+
     def _decode(self, audio: np.ndarray, words: bool = False):
         assert self._model is not None
         segments, _info = self._model.transcribe(
@@ -138,6 +145,13 @@ class WhisperTranscriber:
         "ask not what your country". So the audio is decoded once, exactly as
         it always was, and only the *text* is cut - at the words whose timings
         straddle each silence.
+
+        (A two-pass version was tried here - decode the words with no
+        punctuation, then decode again primed with that line so a second pass
+        could add the punctuation. Measured against real audio it made things
+        worse: whisper's prompt biases *style* as well as vocabulary, so an
+        unpunctuated, lowercase prompt produced unpunctuated, lowercase
+        output. Reverted; see join_segments for what replaced it.)
         """
         if audio is None or len(audio) == 0:
             return []
@@ -156,13 +170,23 @@ class WhisperTranscriber:
             return self._plain(raw)
         return self._split_at_pauses(words, pauses)
 
+    def _pause_threshold(self) -> float:
+        """The shortest gap worth finding in the waveform at all - whichever
+        of the two thresholds below is smaller and actually turned on."""
+        candidates = [t for t in (self.paragraph_pause_seconds, self.comma_pause_seconds) if t > 0]
+        return min(candidates) if candidates else 0.0
+
     def _pauses(self, audio: np.ndarray) -> list[tuple[float, float]]:
-        """The silences long enough to mean "new paragraph", in seconds."""
-        if self.paragraph_pause_seconds <= 0:
+        """Every silence long enough to matter, in seconds.
+
+        Whether a given gap becomes a paragraph break or just a comma is
+        decided later, in join_segments, purely from its length - this only
+        finds where the speaker actually paused.
+        """
+        threshold = self._pause_threshold()
+        if threshold <= 0:
             return []
-        spans = speech_spans(
-            audio, self.sample_rate, min_silence=self.paragraph_pause_seconds
-        )
+        spans = speech_spans(audio, self.sample_rate, min_silence=threshold)
         pauses = [
             (previous[1] / self.sample_rate, current[0] / self.sample_rate)
             for previous, current in zip(spans, spans[1:])
@@ -210,7 +234,9 @@ class WhisperTranscriber:
             return ""
         t0 = time.monotonic()
         text = join_segments(
-            self.transcribe_segments(audio), self.paragraph_pause_seconds
+            self.transcribe_segments(audio),
+            self.paragraph_pause_seconds,
+            self.comma_pause_seconds,
         ).strip()
         elapsed = time.monotonic() - t0
         audio_seconds = len(audio) / float(self.sample_rate)

@@ -87,6 +87,15 @@ class Config:
     # against real speech, ordinary rhetorical pauses run 1.0-1.5s, so a lower
     # value breaks paragraphs mid-thought. 0 disables pause-based paragraphing.
     paragraph_pause_seconds: float = 2.0
+    # A shorter pause than that, where whisper still tends to drop the comma
+    # it would otherwise have written (measured against real audio: a
+    # 1.0-1.5s gap loses it, a 0.4-0.7s one doesn't). Off by default: the same
+    # measurement also found an ordinary rhetorical pause of about a second
+    # in fluent speech with no grammatical comma there at all, so a length
+    # this short is not a safe universal signal - it will occasionally insert
+    # a comma where none belongs. Worth trying if your own dictation tends to
+    # pause where a comma *should* go; watch the log if you turn it on.
+    comma_pause_seconds: float = 0.0
     # Honour spoken structure commands. See whispa/format.py for the list.
     voice_commands: bool = True
     # Extra or overriding commands, e.g. {"full stop": ".", "new section":
@@ -131,6 +140,12 @@ class Config:
     log_to_file: bool = True
     # Words/phrases rewritten after transcription, e.g. {"gonna": "going to"}.
     replacements: dict[str, str] = field(default_factory=dict)
+    # Strip filler words ("um", "uh"), collapse immediate stutters ("the the
+    # meeting"), and drop a false start ahead of an explicit spoken
+    # correction ("scratch that", "strike that", "disregard that"). See
+    # whispa/format.py:remove_disfluencies for what it does and does not
+    # catch.
+    remove_disfluencies: bool = True
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Config":
@@ -193,6 +208,8 @@ class Config:
             )
         if self.paragraph_pause_seconds < 0:
             problems.append("paragraph_pause_seconds must be >= 0")
+        if self.comma_pause_seconds < 0:
+            problems.append("comma_pause_seconds must be >= 0")
         if self.learn_min_count < 1:
             problems.append("learn_min_count must be >= 1")
         if self.learn_delay_seconds <= 0:

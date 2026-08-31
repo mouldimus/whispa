@@ -133,10 +133,90 @@ def apply_voice_commands(text: str, commands: dict[str, str] | None = None) -> s
     return text
 
 
+_FILLER_RE = re.compile(r"(?i)(?:,\s*)?\b(?:um+|uh+|erm+|hmm+|mm+)\b(?:\s*,)?\s*")
+
+# An immediately repeated word or short phrase is a stutter, not emphasis -
+# "the the meeting", "no no no". Collapsed to the first occurrence; applied
+# repeatedly (see remove_disfluencies) so a run of any length collapses fully.
+_REPEAT_RE = re.compile(r"(?i)\b([A-Za-z']+(?:\s+[A-Za-z']+){0,2})\b([ \t]*,?[ \t]+)\1\b")
+
+# Said out loud, these mean "ignore what I just said" - not "here is more
+# content". Kept short and unambiguous on purpose: a false positive here
+# silently deletes real words, which is worse than leaving a false start in
+# the transcript for the tray's "Fix last dictation..." to clean up.
+CORRECTION_CUES: tuple[str, ...] = (
+    "scratch that",
+    "strike that",
+    "disregard that",
+)
+
+
+def _correction_pattern(cue: str) -> re.Pattern[str]:
+    words = r"[,\s]+".join(re.escape(w) for w in cue.split())
+    boundary = r"[.!?]"
+    return re.compile(
+        rf"(?:(?<={boundary})\s*|^)[^.!?]*?"
+        rf",?\s*\b{words}\b[,]?\s*",
+        re.IGNORECASE,
+    )
+
+
+_CORRECTION_PATTERNS = [(cue, _correction_pattern(cue)) for cue in
+                        sorted(CORRECTION_CUES, key=len, reverse=True)]
+
+
+def remove_disfluencies(text: str) -> str:
+    """Clean up the mess real, unscripted speech leaves in a transcript.
+
+    Three passes, cheapest and safest first:
+
+    1. Filler words ("um", "uh", "erm") - dropped outright, wherever they are.
+    2. An immediately repeated word or short phrase - a stutter, collapsed to
+       one occurrence.
+    3. An explicit spoken correction ("scratch that", "strike that", ...) -
+       the false start since the last sentence boundary is dropped along with
+       the cue phrase itself, keeping only what follows.
+
+    Pass 3 is the only one that deletes content beyond the disfluency itself,
+    which is why its cue list is short and unambiguous - see CORRECTION_CUES.
+    It only reaches back to the nearest boundary: "meet at three, scratch
+    that, meet at four" is handled, but if the false start got a full stop of
+    its own ("Meet at three. Scratch that. Meet at four.") only the cue
+    phrase goes, since reaching back a whole extra sentence risks eating
+    something unrelated. Ordinary speech rarely pauses long enough before a
+    correction to earn that period, so this is the uncommon case.
+    """
+    if not text:
+        return ""
+    text = _FILLER_RE.sub(" ", text)
+    for _ in range(3):
+        collapsed = _REPEAT_RE.sub(r"\1", text)
+        if collapsed == text:
+            break
+        text = collapsed
+    for _cue, pattern in _CORRECTION_PATTERNS:
+        text = pattern.sub("", text)
+    return re.sub(r"[ \t]+", " ", text).strip()
+
+
+def _ends_with_punctuation(text: str) -> bool:
+    stripped = text.rstrip()
+    return bool(stripped) and stripped[-1] in ".,;:!?"
+
+
 def join_segments(
-    segments: list[Segment] | list, pause_seconds: float = 1.0
+    segments: list[Segment] | list,
+    pause_seconds: float = 1.0,
+    comma_seconds: float = 0.0,
 ) -> str:
-    """Join decoded segments, marking a paragraph break at every long pause."""
+    """Join decoded segments, marking a paragraph break at every long pause.
+
+    A shorter pause than that - real, but not paragraph-length - gets a comma
+    instead, if the segment before it doesn't already end with one. Measured
+    against real audio, whisper reliably drops the comma it would otherwise
+    write once a gap gets past about a second, and a plain word-join at that
+    point runs two clauses together with nothing to mark the pause at all.
+    """
     parts: list[str] = []
     previous_end: float | None = None
     for seg in segments:
@@ -148,7 +228,13 @@ def join_segments(
             gap = start - previous_end if previous_end is not None else 0.0
             # A negative gap means the timestamps overlap, which happens around
             # VAD boundaries; treat it as no pause rather than a break.
-            parts.append(PARA_MARK if pause_seconds > 0 and gap >= pause_seconds else " ")
+            if pause_seconds > 0 and gap >= pause_seconds:
+                sep = PARA_MARK
+            elif comma_seconds > 0 and gap >= comma_seconds and not _ends_with_punctuation(parts[-1]):
+                sep = ", "
+            else:
+                sep = " "
+            parts.append(sep)
         parts.append(piece)
         previous_end = float(getattr(seg, "end", start) or start)
     return "".join(parts)
@@ -223,10 +309,13 @@ def format_text(
     use_voice_commands: bool = True,
     capitalise: bool = True,
     bullet: str = "- ",
+    strip_disfluencies: bool = False,
 ) -> str:
-    """Full text-shaping pass: commands -> marks -> real formatting."""
+    """Full text-shaping pass: disfluencies -> commands -> marks -> real formatting."""
     if not text:
         return ""
+    if strip_disfluencies:
+        text = remove_disfluencies(text)
     if use_voice_commands:
         text = apply_voice_commands(text, voice_commands)
     text = render_marks(text, paragraph_style=paragraph_style, bullet=bullet)
@@ -268,6 +357,7 @@ def make_formatter(cfg):
     style = getattr(cfg, "paragraph_style", "blank")
     capitalise = bool(getattr(cfg, "auto_capitalise", True))
     bullet = getattr(cfg, "bullet_prefix", "- ") or "- "
+    strip_disfluencies = bool(getattr(cfg, "remove_disfluencies", True))
 
     def _format(text: str) -> str:
         return format_text(
@@ -277,6 +367,7 @@ def make_formatter(cfg):
             use_voice_commands=use_commands,
             capitalise=capitalise,
             bullet=bullet,
+            strip_disfluencies=strip_disfluencies,
         )
 
     return _format

@@ -110,6 +110,42 @@ accident) with `voice_command_extras`, e.g.
 **Sentences get capitals**, including the first word of each bullet and
 paragraph. `auto_capitalise: false` if you would rather it didn't.
 
+### Cleaning up how you actually talk
+
+Real, unscripted speech is messier than a script: filler words, stutters, and
+catching yourself mid-sentence. whispa cleans up three of these by default:
+
+- **Filler words** — "um", "uh", "erm" are dropped outright.
+- **Immediate repeats** — "the the meeting" becomes "the meeting". This is
+  always treated as a stutter, even on the rare occasion it was deliberate
+  emphasis ("very very good") — there is no way to tell the two apart from
+  the text alone.
+- **An explicit correction** — say "scratch that", "strike that", or
+  "disregard that" and whispa drops everything back to the last sentence (or
+  the last "new paragraph"/"bullet point"/etc.) along with the cue phrase
+  itself, keeping only what follows: *"meet me at three, scratch that, meet
+  me at four"* types **"meet me at four."** The cue list is deliberately this
+  short — a false positive here silently deletes real words, which is worse
+  than leaving a false start in the transcript for **Fix last dictation...**
+  to clean up. Reaching back only works within the current sentence: a false
+  start that got its own full stop ("Meet at three. Scratch that. Meet at
+  four.") only loses the cue phrase, not the sentence before it. Milder,
+  more ambiguous phrases like "no wait" or "no, not that" are deliberately
+  *not* treated as corrections, since people say those as literal content
+  too often for it to be safe.
+
+Turn all three off with `remove_disfluencies: false`.
+
+**A shorter pause can also imply a comma**, off by default. Measured against
+real audio, whisper reliably drops the comma it would otherwise write once a
+pause gets past about a second — but an *ordinary* rhetorical pause in fluent
+speech runs about that long too, with no comma warranted at all (the same
+reason `paragraph_pause_seconds` below 1.5s starts breaking mid-thought, a
+few lines up). So `comma_pause_seconds` ships at `0` — it isn't a safe
+universal default — but is worth trying (say `0.8`) if your own dictation
+tends to pause exactly where a comma belongs; watch the log for a run of
+false ones before trusting it.
+
 ### The indicator
 
 A small pill sits near the bottom of the screen and tells you exactly where
@@ -219,8 +255,9 @@ Run `whispa-console.bat --write-config` to create the settings file, then edit
 - `inject_method` — `paste` (default, fast, works nearly everywhere),
   `type` (slower, for apps that block programmatic paste), or `clipboard`.
 - `paragraph_style`, `paragraph_pause_seconds`, `voice_commands`,
-  `voice_command_extras`, `auto_capitalise`, `bullet_prefix` — the formatting,
-  described above.
+  `voice_command_extras`, `auto_capitalise`, `bullet_prefix`,
+  `remove_disfluencies`, `comma_pause_seconds` — the formatting, described
+  above.
 - `replacements` — hand-written fixes applied to every transcript, e.g.
   `{"gonna": "going to"}`. Learned corrections stack on top of these.
 - `initial_prompt` — a sentence of context that biases spelling. Your jargon
@@ -355,7 +392,19 @@ no Windows, so it is worth being precise about which claims are backed by a run.
   because that same test showed it degrading the transcript to "ASK NOT!"; the
   version that ships decodes once and cuts only the text, at a measured cost of
   nothing (1.25 s vs 1.29 s on the 12 s sample).
-- 171 unit tests. Hotkey matching including every hybrid tap/hold/latch
+- **A two-pass "decode the words, then decode again to add punctuation" idea
+  was tried and thrown away** the same way, for the same reason: measured
+  against the real model, priming the second decode with the first pass's
+  unpunctuated line made it copy that style, producing *worse* punctuation
+  and casing than a single decode - it biases style, not just vocabulary.
+- **The `comma_pause_seconds` measurement itself**: spliced pauses of
+  0.4/0.7/1.0/1.5s into the same real recording and diffed the real model's
+  output against the unspliced baseline. The comma after "Americans" survived
+  a 0.4-0.7s gap and was dropped at 1.0s+, which is why the feature exists -
+  and the same test also reproduced a genuine ~1.1s rhetorical pause already
+  present in the *unspliced* recording with no comma warranted there at all,
+  which is why it ships off.
+- 204 unit tests. Hotkey matching including every hybrid tap/hold/latch
   transition with a fake clock; correction extraction and its refusal to learn
   from rewrites; span location under edits elsewhere in the document and in a
   30,000-character document; learner persistence, conflicts and thresholds;
@@ -364,7 +413,10 @@ no Windows, so it is worth being precise about which claims are backed by a run.
   engine edge cases; corrupt-config fallback; the autostart toggle including
   stale-entry detection and repair after the folder moves; and the log ring
   buffer, including that a reader which falls behind never repeats or skips
-  lines as old ones are evicted.
+  lines as old ones are evicted; the pause-to-comma-or-paragraph
+  classification; and disfluency removal, including that a correction cannot
+  reach back across a paragraph mark and that an ambiguous phrase like "no
+  wait" is deliberately left alone.
 - Model speed figures in the table above.
 - CLI: `--help`, `--write-config`, `--autostart`, invalid config handling.
 - That the Python installer URLs `install.bat` builds for x64, ARM64 and x86
@@ -389,6 +441,12 @@ no Windows, so it is worth being precise about which claims are backed by a run.
   a real Windows process relaunch.
 - Writing to the real Windows registry. The autostart logic is tested against
   an in-memory stand-in; `winreg` itself is not exercised here.
+- **`remove_disfluencies` against whisper's actual output for real filler
+  words and false starts** — real `base.en` decodes here confirmed the
+  comma-dropping behaviour above, but the audio available had no "um"s or
+  self-corrections in it to decode, so the text-cleanup rules themselves are
+  unit-tested against hand-written strings, not a real transcript that
+  contains one.
 - **Hiding the Windows key from the Start menu** for the `Ctrl + Win` shortcut.
   The decision logic is unit-tested; the pynput key filter it drives is
   Windows-only and has never run. If the Start menu appears mid-dictation, that

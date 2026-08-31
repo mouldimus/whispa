@@ -248,6 +248,7 @@ def main(argv: list[str] | None = None) -> int:
         ),
         sample_rate=cfg.sample_rate,
         paragraph_pause_seconds=cfg.paragraph_pause_seconds,
+        comma_pause_seconds=cfg.comma_pause_seconds,
     )
 
     injector = (
