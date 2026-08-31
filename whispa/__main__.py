@@ -251,8 +251,17 @@ def main(argv: list[str] | None = None) -> int:
             transcriber.initial_prompt = learner.prompt_bias(cfg.initial_prompt) or None
 
     def learn_from_edit(original: str, corrected: str) -> None:
-        if learner.observe(original, corrected):
-            refresh_prompt()
+        pairs = learner.observe(original, corrected)
+        if not pairs:
+            return
+        refresh_prompt()
+        # Flash what was learnt on the pill, so it is visible without opening
+        # the log - unless a dictation is in flight and owns the indicator.
+        if engine.state is State.IDLE:
+            heard, meant = pairs[0]
+            active = learner.replacements().get(heard.lower()) == meant
+            note = "now fixing it automatically" if active else "fix it once more and it sticks"
+            _on_state(State.IDLE, f"learned {heard} \u2192 {meant} ({note})", overlay, tray_ref)
 
     watcher = None
     if cfg.learn_from_edits:
