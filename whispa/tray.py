@@ -52,6 +52,9 @@ class TrayIcon:
         autostart=None,
         on_set_hotkey: Callable[[str], None] | None = None,
         on_update_now: Callable[[], str] | None = None,
+        on_set_input_device: Callable[[str | None], str] | None = None,
+        input_devices: Callable[[], list[dict]] | None = None,
+        current_input_device: Callable[[], "int | str | None"] | None = None,
     ) -> None:
         self.hotkey = hotkey
         self.model = model
@@ -65,6 +68,13 @@ class TrayIcon:
         # Returns a short status string; runs a git pull, so it is called on
         # its own thread and guarded against a double click.
         self.on_update_now = on_update_now
+        # Microphone picker: `input_devices` enumerates (fresh, each time the
+        # menu opens), `current_input_device` is the configured spec (None =
+        # system default), and `on_set_input_device` applies and saves a
+        # choice, returning a short status string.
+        self.on_set_input_device = on_set_input_device
+        self.input_devices = input_devices
+        self.current_input_device = current_input_device
         self._icon = None
         self._status = "ready"
         self._updating = False
@@ -158,11 +168,97 @@ class TrayIcon:
 
         return handler
 
+    # --- microphone ---------------------------------------------------------
+
+    def _device_is_current(self, spec: "str | None") -> bool:
+        if self.current_input_device is None:
+            return spec is None
+        current = self.current_input_device()
+        if spec is None:
+            return current is None or (isinstance(current, str) and not current.strip())
+        if isinstance(current, str):
+            return current.strip().casefold() == spec.casefold()
+        return False
+
+    def _microphone_entries(self, pystray):
+        """Build the list on demand, so a headset plugged in a minute ago is
+        already there when the menu opens. pystray calls this every time."""
+        entries = [
+            pystray.MenuItem(
+                "System default (automatic)",
+                self._set_input_device(None),
+                checked=lambda _item: self._device_is_current(None),
+                radio=True,
+            )
+        ]
+        try:
+            devices = self.input_devices() if self.input_devices is not None else []
+        except Exception:
+            log.debug("could not list microphones for the menu", exc_info=True)
+            devices = []
+        if devices:
+            entries.append(pystray.Menu.SEPARATOR)
+        # An index pinned by hand in config.json is not a name the list would
+        # match, so it gets its own entry rather than showing nothing ticked.
+        current = self.current_input_device() if self.current_input_device else None
+        names = [dev["name"].casefold() for dev in devices]
+        if isinstance(current, str) and current.strip() and current.strip().casefold() not in names:
+            entries.append(
+                pystray.MenuItem(
+                    current.strip() + "  (not connected)",
+                    self._set_input_device(current.strip()),
+                    checked=lambda _item: True,
+                    radio=True,
+                )
+            )
+        elif isinstance(current, int) and not isinstance(current, bool):
+            entries.append(
+                pystray.MenuItem(
+                    f"Device #{current}  (from config.json)",
+                    None,
+                    checked=lambda _item: True,
+                    radio=True,
+                    enabled=False,
+                )
+            )
+        for dev in devices:
+            name = dev["name"]
+            label = f"{name}  (default)" if dev.get("default") else name
+            entries.append(
+                pystray.MenuItem(
+                    label,
+                    self._set_input_device(name),
+                    checked=lambda _item, name=name: self._device_is_current(name),
+                    radio=True,
+                )
+            )
+        return entries
+
+    def _set_input_device(self, spec: "str | None"):
+        def handler(_icon=None, _item=None) -> None:
+            if self.on_set_input_device is None:
+                return
+            try:
+                self._status = self.on_set_input_device(spec) or "microphone changed"
+            except Exception:
+                log.exception("could not change the microphone to %r", spec)
+                self._status = "microphone change failed - see log"
+            self._refresh_menu()
+
+        return handler
+
     def _settings_menu(self, pystray):
         entries = []
         if self.on_set_hotkey is not None:
             entries.append(
                 pystray.MenuItem("Shortcut", self._shortcut_menu(pystray))
+            )
+        if self.on_set_input_device is not None:
+            entries.append(
+                pystray.MenuItem(
+                    "Microphone",
+                    pystray.Menu(lambda: self._microphone_entries(pystray)),
+                )
             )
         if self.on_open_console is not None:
             entries.append(

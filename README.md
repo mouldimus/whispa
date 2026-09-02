@@ -192,6 +192,16 @@ which one is live. Changing it takes effect on the next keypress and survives a
 restart. If the shortcut in your `config.json` isn't one of the eight, it stays
 in the list as its own entry, so trying a preset is never a one-way door.
 
+**Microphone** — a radio list: *System default (automatic)* plus every
+microphone Windows can see, rebuilt each time the menu opens so a headset
+you have just plugged in is already there. On automatic, whispa follows
+whatever Windows calls the default input and re-checks every 15 seconds, so
+plugging in a headset, or changing the default in the sound settings, takes
+effect on the next dictation without a restart. Picking a device pins it by
+name — not by index, which shuffles whenever anything is plugged in — and
+if it is unplugged whispa records from the default until it comes back,
+saying so in the log. The pill confirms the choice.
+
 **Update now** — pulls the latest version from the repo immediately and, if
 anything new landed, restarts whispa into it. See *Updating* above. The
 on-screen pill (and the status line at the top of the menu) shows the
@@ -264,7 +274,7 @@ whispa-console.bat --help
   --inject paste|type|clipboard
   --paragraphs blank|single|off
   --no-voice-commands      ignore "new paragraph", "bullet point", ....
-  --input-device 3         pick a microphone (see --list-devices)
+  --input-device NAME|N    pick a microphone by name or index; auto = system default
   --dry-run                transcribe and log, never touch the keyboard
   --no-overlay             hide the on-screen indicator
   --show-overlay-always    keep the indicator visible when idle
@@ -279,6 +289,9 @@ Run `whispa-console.bat --write-config` to create the settings file, then edit
 `%APPDATA%\whispa\config.json`. Worth knowing:
 
 - `hotkey`, `hotkey_mode`, `tap_seconds` — the trigger and its feel.
+- `input_device` — `null` for the system default (followed live), or a
+  microphone's name as the tray's *Settings → Microphone* shows it.
+  `input_device_poll_seconds` is how often the default is re-checked.
 - `model` — accuracy vs speed, see the table below.
 - `inject_method` — `paste` (default, fast, works nearly everywhere),
   `type` (slower, for apps that block programmatic paste), or `clipboard`.
@@ -349,8 +362,11 @@ Note that Windows will not deliver keystrokes between apps at different
 privilege levels, so run whispa the same way as the app you dictate into.
 
 **The bars stay flat and say `no signal`.** It is recording but hearing
-nothing. Check *Settings → Privacy & security → Microphone*, then
-`whispa-console.bat --list-devices` and `--input-device N`.
+nothing. Check *Settings → Privacy & security → Microphone*, then the
+tray's *Settings → Microphone* list — the entry marked *(default)* is what
+*System default* records from, and picking another device switches at once.
+`whispa-console.bat --list-devices` prints the same list with an arrow on the
+one whispa will use.
 
 **It records but nothing is typed.** Run `whispa-console.bat --dry-run` and
 speak. If the text appears in the console, transcription is fine and the
@@ -390,6 +406,7 @@ because tkinter insists; the tray runs detached.
 |---|---|
 | `whispa/config.py` | Settings, JSON load/save, validation, corrupt-file fallback |
 | `whispa/audio.py` | Microphone capture and live level metering |
+| `whispa/devices.py` | Which microphone: follow the default, or pin one by name |
 | `whispa/transcribe.py` | faster-whisper wrapper, text cleanup |
 | `whispa/hotkey.py` | Global hotkey; hybrid/hold/toggle logic, kept pure |
 | `whispa/inject.py` | Clipboard-paste and keystroke injection |

@@ -52,7 +52,18 @@ class Config:
 
     # --- audio --------------------------------------------------------------
     sample_rate: int = 16000
-    input_device: int | None = None
+    # Which microphone. null = the system default, re-checked every few
+    # seconds so a headset plugged in mid-session, or a change in the Windows
+    # sound settings, takes effect on the next dictation. A name (as shown in
+    # the tray's Settings > Microphone menu, or by --list-devices) pins one
+    # device; it is matched by name each time, so it survives the index
+    # reshuffle that happens whenever anything is plugged in. If that device
+    # is missing, the default is used until it comes back. An index also
+    # works, but is only as stable as the device list.
+    input_device: int | str | None = None
+    # How often, while idle, to re-check for new devices and the current
+    # default. 0 disables: the list is read once at startup.
+    input_device_poll_seconds: float = 15.0
     # Recordings shorter than this are treated as a mis-press and dropped.
     min_recording_seconds: float = 0.35
     max_recording_seconds: float = 300.0
@@ -249,6 +260,13 @@ class Config:
             )
         if self.sample_rate not in (8000, 16000, 22050, 44100, 48000):
             problems.append(f"unusual sample_rate {self.sample_rate}; whisper expects 16000")
+        if self.input_device is not None and not isinstance(self.input_device, (int, str)):
+            problems.append(
+                f"input_device must be null, a device name or an index, "
+                f"got {self.input_device!r}"
+            )
+        if self.input_device_poll_seconds < 0:
+            problems.append("input_device_poll_seconds must be >= 0")
         if self.min_recording_seconds < 0:
             problems.append("min_recording_seconds must be >= 0")
         if self.max_recording_seconds <= self.min_recording_seconds:

@@ -13,6 +13,8 @@ from typing import Any, Protocol
 
 import numpy as np
 
+from . import devices
+
 log = logging.getLogger(__name__)
 
 
@@ -28,23 +30,38 @@ class Recorder(Protocol):
 
 
 class MicRecorder:
-    """Records from the default (or configured) input device at 16 kHz mono."""
+    """Records from the configured (or system default) input device at 16 kHz mono.
+
+    `device` is a spec as described in whispa/devices.py: None for the system
+    default, a name, or an index. It is resolved to a real device on every
+    `refresh()`, which a background poll runs every few seconds while idle, so
+    a headset plugged in mid-session is picked up without a restart and a
+    device index that shifted is not a problem.
+    """
 
     def __init__(
         self,
         sample_rate: int = 16000,
-        device: int | None = None,
+        device: int | str | None = None,
         max_seconds: float = 300.0,
+        poll_seconds: float = 15.0,
     ) -> None:
         self.sample_rate = sample_rate
         self.device = device
         self.max_seconds = max_seconds
+        self.poll_seconds = poll_seconds
         self._frames: list[np.ndarray] = []
         self._stream: Any = None
         self._lock = threading.Lock()
+        # Held while PortAudio is being re-initialised or a stream opened or
+        # closed: tearing PortAudio down under an open stream is a crash.
+        self._device_lock = threading.Lock()
         self._recording = False
         self._overflowed = False
         self._level = 0.0
+        self._choice: devices.Choice | None = None
+        self._poll_stop = threading.Event()
+        self._poller: threading.Thread | None = None
 
     @property
     def is_recording(self) -> bool:
@@ -59,6 +76,67 @@ class MicRecorder:
         a flat meter instead of a reassuring animation.
         """
         return self._level
+
+    @property
+    def device_name(self) -> str:
+        """The microphone the next recording will use, for the tray and log."""
+        return self._choice.describe() if self._choice is not None else "not checked yet"
+
+    # --- device choice ------------------------------------------------------
+
+    def refresh(self) -> "devices.Choice | None":
+        """Re-enumerate devices and re-resolve the spec.
+
+        Skipped while recording (PortAudio cannot be restarted under an open
+        stream); the next idle poll picks it up.
+        """
+        with self._device_lock:
+            if self._recording:
+                return self._choice
+            devices.refresh()
+            return self._resolve_locked()
+
+    def _resolve_locked(self) -> "devices.Choice":
+        choice = devices.resolve(self.device)
+        previous = self._choice
+        if previous is None or choice != previous:
+            if choice.fallback:
+                log.warning("microphone: %s (%s)", choice.describe(), choice.fallback)
+            else:
+                log.info("microphone: %s", choice.describe())
+        self._choice = choice
+        return choice
+
+    def set_device(self, spec: int | str | None) -> "devices.Choice | None":
+        self.device = spec
+        return self.refresh()
+
+    def start_polling(self) -> None:
+        """Keep the device choice current in the background.
+
+        This is what makes "system default" actually follow the system: with
+        no poll, whispa would record from whatever was the default when it
+        started, for as long as it ran.
+        """
+        if self.poll_seconds <= 0 or self._poller is not None:
+            return
+
+        def run() -> None:
+            while not self._poll_stop.wait(self.poll_seconds):
+                try:
+                    self.refresh()
+                except Exception:
+                    log.debug("device poll failed", exc_info=True)
+
+        self._poll_stop.clear()
+        self._poller = threading.Thread(target=run, name="whispa-devices", daemon=True)
+        self._poller.start()
+
+    def stop_polling(self) -> None:
+        self._poll_stop.set()
+        self._poller = None
+
+    # --- capture ------------------------------------------------------------
 
     def _update_level(self, block: np.ndarray) -> None:
         rms = float(np.sqrt(np.mean(np.square(block)))) if len(block) else 0.0
@@ -91,9 +169,21 @@ class MicRecorder:
     def _collected_seconds(self) -> float:
         return sum(len(f) for f in self._frames) / float(self.sample_rate)
 
-    def start(self) -> None:
+    def _open_stream(self, index: int | None) -> Any:
         import sounddevice as sd  # imported lazily: no audio device in CI/tests
 
+        stream = sd.InputStream(
+            samplerate=self.sample_rate,
+            channels=1,
+            dtype="float32",
+            device=index,
+            callback=self._callback,
+            blocksize=0,
+        )
+        stream.start()
+        return stream
+
+    def start(self) -> None:
         with self._lock:
             if self._recording:
                 return
@@ -101,16 +191,26 @@ class MicRecorder:
             self._overflowed = False
             self._level = 0.0
             self._recording = True
-        self._stream = sd.InputStream(
-            samplerate=self.sample_rate,
-            channels=1,
-            dtype="float32",
-            device=self.device,
-            callback=self._callback,
-            blocksize=0,
-        )
-        self._stream.start()
-        log.debug("recording started (device=%s)", self.device)
+        try:
+            with self._device_lock:
+                if self._choice is None:
+                    self._resolve_locked()
+                try:
+                    self._stream = self._open_stream(self._choice.index)
+                except Exception as exc:
+                    # The device list is only as fresh as the last poll. If the
+                    # chosen microphone has just gone away, look again once
+                    # before giving up - the hotkey press is the moment the
+                    # user least wants a "microphone unavailable".
+                    log.info("could not open %s (%s); re-checking devices", self.device_name, exc)
+                    devices.refresh()
+                    choice = self._resolve_locked()
+                    self._stream = self._open_stream(choice.index)
+        except Exception:
+            with self._lock:
+                self._recording = False
+            raise
+        log.debug("recording started (%s)", self.device_name)
 
     def stop(self) -> np.ndarray:
         with self._lock:
@@ -118,12 +218,13 @@ class MicRecorder:
                 return np.zeros(0, dtype=np.float32)
             self._recording = False
             self._level = 0.0
-        if self._stream is not None:
-            try:
-                self._stream.stop()
-                self._stream.close()
-            finally:
-                self._stream = None
+        with self._device_lock:
+            if self._stream is not None:
+                try:
+                    self._stream.stop()
+                    self._stream.close()
+                finally:
+                    self._stream = None
         with self._lock:
             frames, self._frames = self._frames, []
         if self._overflowed:
@@ -203,19 +304,6 @@ def peak_level(audio: np.ndarray) -> float:
     return float(np.max(np.abs(audio))) if len(audio) else 0.0
 
 
-def list_input_devices() -> list[dict[str, Any]]:
-    """Enumerate usable input devices, for the tray menu and troubleshooting."""
-    import sounddevice as sd
-
-    devices = []
-    for idx, dev in enumerate(sd.query_devices()):
-        if dev.get("max_input_channels", 0) > 0:
-            devices.append(
-                {
-                    "index": idx,
-                    "name": dev.get("name", "?"),
-                    "channels": dev.get("max_input_channels", 0),
-                    "default_samplerate": dev.get("default_samplerate"),
-                }
-            )
-    return devices
+def list_input_devices(all_apis: bool = False) -> list[dict[str, Any]]:
+    """Enumerate usable input devices; see whispa/devices.py."""
+    return devices.list_input_devices(all_apis=all_apis)

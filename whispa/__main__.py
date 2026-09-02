@@ -43,7 +43,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--model", help="base.en, small.en, medium.en, large-v3 ...")
     p.add_argument("--device", help="cpu or cuda")
     p.add_argument("--compute-type", help="int8, int8_float16, float16, float32")
-    p.add_argument("--input-device", type=int, help="microphone index")
+    p.add_argument(
+        "--input-device",
+        metavar="NAME|N",
+        help="microphone, by name or index (see --list-devices); 'auto' = system default",
+    )
     p.add_argument(
         "--inject", choices=["paste", "type", "clipboard"], help="how to deliver text"
     )
@@ -123,6 +127,16 @@ def setup_logging(cfg: Config, args: argparse.Namespace):
     return buffer
 
 
+def parse_input_device(value: str) -> "int | str | None":
+    """--input-device accepts an index, a name, or auto/default for None."""
+    text = value.strip()
+    if text.lower() in ("", "auto", "default", "none"):
+        return None
+    if text.isdigit():
+        return int(text)
+    return text
+
+
 def apply_overrides(cfg: Config, args: argparse.Namespace) -> Config:
     for attr, field_name in (
         ("hotkey", "hotkey"),
@@ -136,6 +150,8 @@ def apply_overrides(cfg: Config, args: argparse.Namespace) -> Config:
     ):
         value = getattr(args, attr, None)
         if value is not None:
+            if field_name == "input_device":
+                value = parse_input_device(value)
             setattr(cfg, field_name, value)
     if args.no_overlay:
         cfg.overlay = False
@@ -189,8 +205,21 @@ def main(argv: list[str] | None = None) -> int:
     if args.list_devices:
         from .audio import list_input_devices
 
+        from .devices import resolve
+
+        chosen = resolve(cfg.input_device)
         for dev in list_input_devices():
-            print(f"[{dev['index']:>2}] {dev['name']}  ({dev['channels']}ch)")
+            marks = []
+            if dev.get("default"):
+                marks.append("system default")
+            if chosen.index == dev["index"] or (chosen.index is None and dev.get("default")):
+                marks.append("whispa will use this")
+            note = f"   <- {', '.join(marks)}" if marks else ""
+            print(f"[{dev['index']:>2}] {dev['name']}  ({dev['channels']}ch){note}")
+        if chosen.fallback:
+            print(f"note: {chosen.fallback}")
+        spec = cfg.input_device
+        print(f"configured: {'system default (automatic)' if spec in (None, '') else spec!r}")
         return 0
 
     problems = cfg.validate()
@@ -210,7 +239,7 @@ def main(argv: list[str] | None = None) -> int:
         except Exception:
             log.warning("auto-update check failed", exc_info=True)
 
-    from .audio import MicRecorder
+    from .audio import MicRecorder, list_input_devices
     from .learn import CorrectionLearner
     from .observe import CorrectionWatcher, make_observer
 
@@ -218,7 +247,13 @@ def main(argv: list[str] | None = None) -> int:
         sample_rate=cfg.sample_rate,
         device=cfg.input_device,
         max_seconds=cfg.max_recording_seconds,
+        poll_seconds=cfg.input_device_poll_seconds,
     )
+    try:
+        recorder.refresh()
+        recorder.start_polling()
+    except Exception:
+        log.warning("could not enumerate microphones", exc_info=True)
     learner = CorrectionLearner(
         path=default_config_dir() / "learned.json",
         min_count=cfg.learn_min_count,
@@ -369,6 +404,34 @@ def main(argv: list[str] | None = None) -> int:
             log.exception("shortcut changed but could not be saved")
         log.info("shortcut is now %s", spec)
 
+    def menu_devices() -> list[dict]:
+        # Re-enumerate as the menu opens, so a headset plugged in a moment
+        # ago is listed (the idle poll may not have run yet).
+        recorder.refresh()
+        return list_input_devices()
+
+    def set_input_device(spec: "str | None") -> str:
+        """Switch microphone from the tray, and remember it.
+
+        Applied first, saved second, as with the shortcut: the recorder
+        resolves the name straight away, so the status can say what it will
+        actually record from.
+        """
+        choice = recorder.set_device(spec)
+        cfg.input_device = spec
+        try:
+            cfg.save(args.config)
+        except OSError:
+            log.exception("microphone changed but could not be saved")
+        if choice is None:
+            return "microphone will change after this recording"
+        status = f"microphone: {choice.describe()}"
+        if choice.fallback:
+            status += f" - {choice.fallback}"
+        if engine.state is State.IDLE:
+            _on_state(State.IDLE, status, overlay, tray_ref)
+        return status
+
     def update_now() -> str:
         """The tray's "Update now": pull, and restart into the new version.
 
@@ -411,6 +474,9 @@ def main(argv: list[str] | None = None) -> int:
                 autostart=autostart,
                 on_set_hotkey=set_hotkey,
                 on_update_now=update_now,
+                on_set_input_device=set_input_device,
+                input_devices=menu_devices,
+                current_input_device=lambda: cfg.input_device,
             )
             tray_ref[0] = tray
         except Exception:
@@ -493,6 +559,7 @@ def main(argv: list[str] | None = None) -> int:
         if watcher is not None:
             watcher.cancel()
         engine.shutdown()
+        recorder.stop_polling()
         if tray is not None:
             tray.stop()
         if log_window_ref[0] is not None:
