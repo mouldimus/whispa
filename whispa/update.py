@@ -197,9 +197,15 @@ class AutoUpdater:
                 log.warning("update pull failed, staying on the current version: %s", pull.stderr.strip())
                 return Outcome(False, "update failed to apply - see log")
 
-            log.info("updated %d commit(s) from origin/%s", behind, branch)
+            head = self.run(["git", "log", "-1", "--format=%h %cs"], self.root, _LOCAL_TIMEOUT)
+            commit = head.stdout.strip() if head.returncode == 0 else ""
+            log.info("updated %d commit(s) from origin/%s, now at %s", behind, branch, commit or "?")
             if self._requirements_text() != req_before:
                 self._sync_dependencies()
+            # Short enough for the pill, which cuts at ~20 characters; the
+            # date and count are in the log line above.
+            if commit:
+                return Outcome(True, f"updated to {commit.split()[0]}")
             return Outcome(True, f"updated ({behind} commit{'s' if behind != 1 else ''})")
         except Exception:
             log.warning("auto-update check failed", exc_info=True)

@@ -16,7 +16,7 @@ import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from . import __version__
+from . import __version__, build_id, build_short
 from .app import DictationEngine, State
 from .config import Config, default_config_dir
 from .format import make_formatter
@@ -175,7 +175,7 @@ def main(argv: list[str] | None = None) -> int:
     cfg, load_problem = Config.load_checked(args.config)
     cfg = apply_overrides(cfg, args)
     log_buffer = setup_logging(cfg, args)
-    log.info("whispa %s starting from %s", __version__, Path(__file__).parent)
+    log.info("whispa %s starting from %s", build_id(), Path(__file__).parent)
     if load_problem:
         log.error("%s", load_problem)
 
@@ -452,11 +452,13 @@ def main(argv: list[str] | None = None) -> int:
             _on_state(State.IDLE, outcome.message, overlay, tray_ref)
             return outcome.message
         if spawn_replacement():
-            _on_state(State.IDLE, "updated - restarting", overlay, tray_ref)
+            message = f"{outcome.message} - restarting"
+            _on_state(State.IDLE, message, overlay, tray_ref)
             quit_everything()
-            return "updated - restarting"
-        _on_state(State.ERROR, "updated - restart whispa to finish", overlay, tray_ref)
-        return "updated - restart whispa to finish"
+            return message
+        message = f"{outcome.message} - restart whispa to finish"
+        _on_state(State.ERROR, message, overlay, tray_ref)
+        return message
 
     tray = None
     if not args.no_tray:
@@ -529,7 +531,7 @@ def main(argv: list[str] | None = None) -> int:
             "ready: %s (%s), learning %s", cfg.hotkey, cfg.hotkey_mode, learning
         )
         if overlay is not None:
-            overlay.set_state(State.IDLE, "ready", force=False)
+            overlay.set_state(State.IDLE, f"ready \u00b7 {build_short()}", force=False)
 
     threading.Thread(target=startup, name="whispa-startup", daemon=True).start()
 

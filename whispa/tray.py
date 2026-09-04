@@ -11,7 +11,7 @@ import logging
 import threading
 from typing import Callable
 
-from . import __version__
+from . import build_id
 from .app import State
 from .hotkey import PRESETS, parse_hotkey, preset_label
 
@@ -104,7 +104,7 @@ class TrayIcon:
             pystray.MenuItem(lambda _: f"Status: {self._status}", None, enabled=False),
             pystray.MenuItem(self._usage_hint, None, enabled=False),
             pystray.MenuItem(
-                f"Model: {self.model}   (whispa {__version__})", None, enabled=False
+                f"Model: {self.model}   (whispa {build_id()})", None, enabled=False
             ),
             pystray.MenuItem(self._learned_label, None, enabled=False),
             pystray.Menu.SEPARATOR,

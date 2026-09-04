@@ -205,8 +205,11 @@ saying so in the log. The pill confirms the choice.
 **Update now** — pulls the latest version from the repo immediately and, if
 anything new landed, restarts whispa into it. See *Updating* above. The
 on-screen pill (and the status line at the top of the menu) shows the
-outcome: "checking for updates...", "updated - restarting", "already up to
-date", or the reason it couldn't.
+outcome: "checking for updates...", "updated to 6270b4b - restarting",
+"already up to date", or the reason it couldn't. The commit hash is the
+real version: the tray's model line shows it in full (`whispa 5.1 @ 6270b4b
+2026-09-04`), the pill says `ready · 6270b4b` once the new build is up, and
+the log's first line records it at every start.
 
 **Start with Windows** — a checkbox. On, whispa starts at login; off, it
 doesn't. It writes a single value to your own `HKCU\...\CurrentVersion\Run`
