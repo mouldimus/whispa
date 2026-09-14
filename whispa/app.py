@@ -51,6 +51,61 @@ class Stats:
         )
 
 
+class SerialQueue:
+    """Runs callables one at a time, in order, on a thread of its own.
+
+    The hotkey callbacks arrive on pynput's thread, which on Windows is the
+    low-level keyboard hook itself: Windows silently removes a hook that
+    stalls for more than a few hundred milliseconds, and from then on the
+    shortcut is dead for the rest of the session. Opening the microphone
+    can stall exactly that long when a device re-enumeration holds the
+    recorder's lock. So the hook thread only ever enqueues, and the work -
+    still strictly in press/release order - happens here.
+    """
+
+    def __init__(self, name: str = "whispa-actions") -> None:
+        self.name = name
+        self._jobs: queue.Queue = queue.Queue()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(target=self._run, name=self.name, daemon=True)
+        self._thread.start()
+
+    def submit(self, fn: Callable[[], None]) -> None:
+        self._jobs.put(fn)
+
+    def stop(self, timeout: float = 2.0) -> None:
+        if self._thread is None:
+            return
+        self._jobs.put(None)
+        self._thread.join(timeout=timeout)
+        self._thread = None
+
+    def join(self, timeout: float = 5.0) -> bool:
+        """Block until everything queued so far has run (tests)."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self._jobs.unfinished_tasks == 0:
+                return True
+            time.sleep(0.005)
+        return False
+
+    def _run(self) -> None:
+        while True:
+            fn = self._jobs.get()
+            try:
+                if fn is None:
+                    return
+                fn()
+            except Exception:
+                log.exception("hotkey action failed")
+            finally:
+                self._jobs.task_done()
+
+
 class DictationEngine:
     """Owns the recording lifecycle.
 

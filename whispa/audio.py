@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 import numpy as np
 
@@ -37,6 +37,13 @@ class MicRecorder:
     `refresh()`, which a background poll runs every few seconds while idle, so
     a headset plugged in mid-session is picked up without a restart and a
     device index that shifted is not a problem.
+
+    Every call into PortAudio - re-initialising it, opening or closing a
+    stream, even listing devices - goes through `_device_lock`. PortAudio's
+    init and terminate are not thread-safe against anything, and a query
+    that overlaps a re-init crashes the process rather than raising. The
+    re-init itself is gated on `fingerprint`: unless the devices Windows
+    reports have changed, a refresh only re-reads the existing tables.
     """
 
     def __init__(
@@ -45,21 +52,27 @@ class MicRecorder:
         device: int | str | None = None,
         max_seconds: float = 300.0,
         poll_seconds: float = 15.0,
+        fingerprint: "Callable[[], tuple | None] | None" = None,
     ) -> None:
         self.sample_rate = sample_rate
         self.device = device
         self.max_seconds = max_seconds
         self.poll_seconds = poll_seconds
+        self._fingerprint = fingerprint or devices.fingerprint
         self._frames: list[np.ndarray] = []
         self._stream: Any = None
         self._lock = threading.Lock()
-        # Held while PortAudio is being re-initialised or a stream opened or
-        # closed: tearing PortAudio down under an open stream is a crash.
+        # Held around every PortAudio call: tearing PortAudio down under an
+        # open stream, or under another thread's device query, is a crash.
         self._device_lock = threading.Lock()
         self._recording = False
         self._overflowed = False
         self._level = 0.0
         self._choice: devices.Choice | None = None
+        # The fingerprint at the last PortAudio re-init, and the input list
+        # read then - what the tray shows, without touching PortAudio.
+        self._seen: tuple | None = None
+        self._devices: list[dict[str, Any]] = []
         self._poll_stop = threading.Event()
         self._poller: threading.Thread | None = None
 
@@ -82,19 +95,49 @@ class MicRecorder:
         """The microphone the next recording will use, for the tray and log."""
         return self._choice.describe() if self._choice is not None else "not checked yet"
 
+    @property
+    def known_devices(self) -> list[dict[str, Any]]:
+        """The input devices as of the last re-enumeration, for the tray menu.
+
+        A cached copy on purpose: the tray rebuilds its menu on every state
+        change, from the hotkey and transcription threads, and a menu
+        builder that touched PortAudio from there was the crash this cache
+        replaced. The idle poll keeps it within one interval of the truth.
+        """
+        return list(self._devices)
+
     # --- device choice ------------------------------------------------------
 
-    def refresh(self) -> "devices.Choice | None":
-        """Re-enumerate devices and re-resolve the spec.
+    def refresh(self, force: bool = False) -> "devices.Choice | None":
+        """Re-check the microphone, re-enumerating only if something changed.
 
         Skipped while recording (PortAudio cannot be restarted under an open
-        stream); the next idle poll picks it up.
+        stream); the next idle poll picks it up. `force` re-initialises
+        PortAudio regardless of the fingerprint - for when a device that
+        should exist could not be opened.
         """
         with self._device_lock:
             if self._recording:
                 return self._choice
+            return self._refresh_locked(force)
+
+    def _refresh_locked(self, force: bool) -> "devices.Choice":
+        try:
+            current = self._fingerprint()
+        except Exception:
+            log.debug("device fingerprint failed", exc_info=True)
+            current = None
+        # No fingerprint (not Windows) means no way to tell, so re-init as
+        # the poll always did; with one, a re-init needs an actual change.
+        if force or current is None or current != self._seen or self._choice is None:
             devices.refresh()
-            return self._resolve_locked()
+            self._seen = current
+            try:
+                self._devices = devices.list_input_devices()
+            except Exception:
+                log.debug("could not list input devices", exc_info=True)
+                self._devices = []
+        return self._resolve_locked()
 
     def _resolve_locked(self) -> "devices.Choice":
         choice = devices.resolve(self.device)
@@ -194,7 +237,7 @@ class MicRecorder:
         try:
             with self._device_lock:
                 if self._choice is None:
-                    self._resolve_locked()
+                    self._refresh_locked(force=False)
                 try:
                     self._stream = self._open_stream(self._choice.index)
                 except Exception as exc:
@@ -203,9 +246,19 @@ class MicRecorder:
                     # before giving up - the hotkey press is the moment the
                     # user least wants a "microphone unavailable".
                     log.info("could not open %s (%s); re-checking devices", self.device_name, exc)
-                    devices.refresh()
-                    choice = self._resolve_locked()
-                    self._stream = self._open_stream(choice.index)
+                    choice = self._refresh_locked(force=True)
+                    try:
+                        self._stream = self._open_stream(choice.index)
+                    except Exception as exc2:
+                        if choice.index is None:
+                            raise
+                        # Last resort: whatever PortAudio itself calls the
+                        # default input.
+                        log.info(
+                            "could not open %s either (%s); using PortAudio's default",
+                            choice.describe(), exc2,
+                        )
+                        self._stream = self._open_stream(None)
         except Exception:
             with self._lock:
                 self._recording = False
@@ -213,12 +266,16 @@ class MicRecorder:
         log.debug("recording started (%s)", self.device_name)
 
     def stop(self) -> np.ndarray:
-        with self._lock:
-            if not self._recording:
-                return np.zeros(0, dtype=np.float32)
-            self._recording = False
-            self._level = 0.0
+        # The recording flag is cleared under the device lock as well: it is
+        # what tells refresh() that a stream is open, and dropping it before
+        # the stream is closed leaves a gap in which the poll could tear
+        # PortAudio down under a live stream.
         with self._device_lock:
+            with self._lock:
+                if not self._recording:
+                    return np.zeros(0, dtype=np.float32)
+                self._recording = False
+                self._level = 0.0
             if self._stream is not None:
                 try:
                     self._stream.stop()
@@ -305,5 +362,10 @@ def peak_level(audio: np.ndarray) -> float:
 
 
 def list_input_devices(all_apis: bool = False) -> list[dict[str, Any]]:
-    """Enumerate usable input devices; see whispa/devices.py."""
+    """Enumerate usable input devices; see whispa/devices.py.
+
+    For --list-devices and tests. A running app must go through
+    MicRecorder.known_devices instead, so nothing reads PortAudio while
+    the recorder may be re-initialising it.
+    """
     return devices.list_input_devices(all_apis=all_apis)

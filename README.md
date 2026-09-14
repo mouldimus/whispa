@@ -193,9 +193,10 @@ restart. If the shortcut in your `config.json` isn't one of the eight, it stays
 in the list as its own entry, so trying a preset is never a one-way door.
 
 **Microphone** — a radio list: *System default (automatic)* plus every
-microphone Windows can see, rebuilt each time the menu opens so a headset
-you have just plugged in is already there. On automatic, whispa follows
-whatever Windows calls the default input and re-checks every 15 seconds, so
+microphone Windows can see, as of the last check (every 15 seconds while
+idle, so a headset you have just plugged in appears within that). On
+automatic, whispa records through the Windows sound mapper, which resolves
+to whatever the default input is at the moment each recording starts - so
 plugging in a headset, or changing the default in the sound settings, takes
 effect on the next dictation without a restart. Picking a device pins it by
 name — not by index, which shuffles whenever anything is plugged in — and
@@ -294,7 +295,9 @@ Run `whispa-console.bat --write-config` to create the settings file, then edit
 - `hotkey`, `hotkey_mode`, `tap_seconds` — the trigger and its feel.
 - `input_device` — `null` for the system default (followed live), or a
   microphone's name as the tray's *Settings → Microphone* shows it.
-  `input_device_poll_seconds` is how often the default is re-checked.
+  `input_device_poll_seconds` is how often the device list is re-checked;
+  the check is cheap, and the audio stack is only re-initialised when
+  Windows reports that something was plugged in or out or the default moved.
 - `model` — accuracy vs speed, see the table below.
 - `inject_method` — `paste` (default, fast, works nearly everywhere),
   `type` (slower, for apps that block programmatic paste), or `clipboard`.

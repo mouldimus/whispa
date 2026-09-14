@@ -17,7 +17,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from . import __version__, build_id, build_short
-from .app import DictationEngine, State
+from .app import DictationEngine, SerialQueue, State
 from .config import Config, default_config_dir
 from .format import make_formatter
 from .hotkey import GlobalHotkey
@@ -212,7 +212,8 @@ def main(argv: list[str] | None = None) -> int:
             marks = []
             if dev.get("default"):
                 marks.append("system default")
-            if chosen.index == dev["index"] or (chosen.index is None and dev.get("default")):
+            uses = dev.get("default") if chosen.follows_default else chosen.index == dev["index"]
+            if uses:
                 marks.append("whispa will use this")
             note = f"   <- {', '.join(marks)}" if marks else ""
             print(f"[{dev['index']:>2}] {dev['name']}  ({dev['channels']}ch){note}")
@@ -239,7 +240,7 @@ def main(argv: list[str] | None = None) -> int:
         except Exception:
             log.warning("auto-update check failed", exc_info=True)
 
-    from .audio import MicRecorder, list_input_devices
+    from .audio import MicRecorder
     from .learn import CorrectionLearner
     from .observe import CorrectionWatcher, make_observer
 
@@ -405,10 +406,12 @@ def main(argv: list[str] | None = None) -> int:
         log.info("shortcut is now %s", spec)
 
     def menu_devices() -> list[dict]:
-        # Re-enumerate as the menu opens, so a headset plugged in a moment
-        # ago is listed (the idle poll may not have run yet).
-        recorder.refresh()
-        return list_input_devices()
+        # pystray builds the whole menu tree, this submenu included, inside
+        # every update_menu() call - which set_state() makes on the hotkey
+        # and transcription threads. So this must be a cached read: the
+        # version that re-enumerated here tore PortAudio down twice per
+        # dictation, from the keyboard hook, and crashed the app.
+        return recorder.known_devices
 
     def set_input_device(spec: "str | None") -> str:
         """Switch microphone from the tray, and remember it.
@@ -485,6 +488,10 @@ def main(argv: list[str] | None = None) -> int:
             log.warning("tray unavailable, continuing without it", exc_info=True)
 
     engine.start()
+    # Hotkey presses are handed off here so pynput's hook thread never
+    # blocks on the microphone (see SerialQueue).
+    actions = SerialQueue()
+    actions.start()
 
     def startup() -> None:
         """Load the model, then arm the hotkey. Runs off the UI thread."""
@@ -508,8 +515,8 @@ def main(argv: list[str] | None = None) -> int:
             hotkey = GlobalHotkey(
                 spec=cfg.hotkey,
                 mode=cfg.hotkey_mode,
-                on_start=engine.begin_recording,
-                on_stop=engine.end_recording,
+                on_start=lambda: actions.submit(engine.begin_recording),
+                on_stop=lambda: actions.submit(engine.end_recording),
                 on_held_change=lambda held: setattr(injector, "held_modifiers", held),
                 tap_seconds=cfg.tap_seconds,
             )
@@ -558,6 +565,7 @@ def main(argv: list[str] | None = None) -> int:
         shutdown.set()
         for hk in hotkeys:
             hk.stop()
+        actions.stop()
         if watcher is not None:
             watcher.cancel()
         engine.shutdown()

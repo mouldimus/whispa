@@ -19,6 +19,15 @@ A microphone is chosen by a *spec*:
 - an index - as `--list-devices` prints it. Kept for hand-edited configs; a
   name is more robust.
 
+Re-initialising PortAudio is not free of risk: it is documented as not
+thread-safe, it must never overlap an open stream or even a device query, and
+on Windows it re-enumerates every driver (WDM-KS included) each time. So it
+happens as rarely as possible: only when `fingerprint()` - a cheap winmm
+query that never touches PortAudio - says the set of devices or the default
+has actually changed. And the default is followed without any re-init at
+all: recording through the MME "Microsoft Sound Mapper" makes Windows pick
+the current default at the moment the stream opens.
+
 Deliberately free of numpy and of any module-level `sounddevice` import, so
 that it can be unit-tested on a box with neither.
 """
@@ -26,10 +35,16 @@ that it can be unit-tested on a box with neither.
 from __future__ import annotations
 
 import logging
+import sys
 from dataclasses import dataclass
 from typing import Any
 
 log = logging.getLogger(__name__)
+
+# The MME wave mapper, as PortAudio names it. Opening it asks winmm for the
+# current default recording device, so it follows the Windows setting without
+# PortAudio ever being told anything changed.
+MAPPER_PREFIX = "microsoft sound mapper"
 
 
 @dataclass(frozen=True)
@@ -43,11 +58,15 @@ class Choice:
     # Empty when the spec was honoured; otherwise why the default was used
     # instead (device unplugged, index out of range, ...).
     fallback: str = ""
+    # True when this is "whatever Windows calls the default" rather than a
+    # device picked by name or index - `index` is then the wave mapper, or
+    # None where there is no mapper (which makes PortAudio use its own default).
+    follows_default: bool = False
 
     def describe(self) -> str:
         if not self.name:
             return "no microphone found"
-        return self.name if self.index is not None else f"{self.name} (system default)"
+        return f"{self.name} (system default)" if self.follows_default else self.name
 
 
 def _sd():
@@ -58,7 +77,14 @@ def _sd():
 
 def refresh() -> None:
     """Make PortAudio re-enumerate, so hot-plugged devices and a changed
-    system default become visible. Must not run while a stream is open."""
+    system default become visible.
+
+    Must not run while a stream is open, or while any other thread is
+    querying devices: PortAudio frees and rebuilds its device tables here,
+    and a reader that lands in the middle of that is an access violation,
+    not a Python exception. MicRecorder serialises every PortAudio call
+    behind one lock for exactly this reason.
+    """
     sd = _sd()
     try:
         sd._terminate()
@@ -128,6 +154,98 @@ def list_input_devices(all_apis: bool = False) -> list[dict[str, Any]]:
     return devices
 
 
+def _mapper_index(default: dict[str, Any] | None) -> int | None:
+    """The wave mapper in the default's host API, or None if there is none
+    (any non-Windows box, or a default that lives in another host API)."""
+    if not default:
+        return None
+    for idx, dev in enumerate(_all_devices()):
+        if (
+            dev.get("hostapi") == default.get("hostapi")
+            and dev.get("max_input_channels", 0) > 0
+            and str(dev.get("name", "")).casefold().startswith(MAPPER_PREFIX)
+        ):
+            return dev.get("index", idx)
+    return None
+
+
+_winmm: Any = None
+
+
+def _load_winmm() -> Any:
+    """ctypes bindings for the three winmm calls fingerprint() needs."""
+    global _winmm
+    if _winmm is not None:
+        return _winmm
+    import ctypes
+    from ctypes import wintypes
+
+    class WAVEINCAPSW(ctypes.Structure):
+        _fields_ = [
+            ("wMid", wintypes.WORD),
+            ("wPid", wintypes.WORD),
+            ("vDriverVersion", wintypes.UINT),
+            ("szPname", wintypes.WCHAR * 32),
+            ("dwFormats", wintypes.DWORD),
+            ("wChannels", wintypes.WORD),
+            ("wReserved1", wintypes.WORD),
+        ]
+
+    lib = ctypes.WinDLL("winmm")
+    lib.waveInGetNumDevs.argtypes = ()
+    lib.waveInGetNumDevs.restype = wintypes.UINT
+    lib.waveInGetDevCapsW.argtypes = (ctypes.c_size_t, ctypes.POINTER(WAVEINCAPSW), wintypes.UINT)
+    lib.waveInGetDevCapsW.restype = wintypes.UINT
+    lib.waveInMessage.argtypes = (ctypes.c_void_p, wintypes.UINT, ctypes.c_void_p, ctypes.c_void_p)
+    lib.waveInMessage.restype = wintypes.UINT
+    _winmm = (lib, WAVEINCAPSW)
+    return _winmm
+
+
+# winmm's "which device does the mapper currently prefer?" - the same query
+# PortAudio uses to mark its default input, but callable at any time.
+_WAVE_MAPPER = 0xFFFFFFFF
+_DRVM_MAPPER_PREFERRED_GET = 0x2015
+
+
+def fingerprint() -> tuple | None:
+    """A cheap snapshot of the recording devices Windows has right now, and
+    which one is the default - without touching PortAudio.
+
+    Two equal fingerprints mean nothing worth a PortAudio re-init has
+    happened. Returns None where it cannot tell (not Windows, winmm missing),
+    and callers then fall back to re-initialising on a timer as before.
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        lib, caps_type = _load_winmm()
+        count = int(lib.waveInGetNumDevs())
+        names = []
+        for index in range(count):
+            caps = caps_type()
+            if lib.waveInGetDevCapsW(index, ctypes.byref(caps), ctypes.sizeof(caps)) == 0:
+                names.append(caps.szPname)
+            else:
+                names.append(f"#{index}")
+        preferred = wintypes.DWORD(_WAVE_MAPPER)
+        status = wintypes.DWORD(0)
+        result = lib.waveInMessage(
+            ctypes.c_void_p(_WAVE_MAPPER),
+            _DRVM_MAPPER_PREFERRED_GET,
+            ctypes.addressof(preferred),
+            ctypes.addressof(status),
+        )
+        default = int(preferred.value) if result == 0 else None
+        return (count, default, tuple(names))
+    except Exception:
+        log.debug("device fingerprint unavailable", exc_info=True)
+        return None
+
+
 def is_auto(spec: Any) -> bool:
     return spec is None or (isinstance(spec, str) and not spec.strip())
 
@@ -140,7 +258,9 @@ def resolve(spec: Any) -> Choice:
     dictation tool that silently stops working.
     """
     default = default_input()
-    default_choice = Choice(None, default.get("name", "") if default else "")
+    default_choice = Choice(
+        _mapper_index(default), default.get("name", "") if default else "", follows_default=True
+    )
     if is_auto(spec):
         return default_choice
 
@@ -156,6 +276,7 @@ def resolve(spec: Any) -> Choice:
             default_choice.index,
             default_choice.name,
             f"no input device at index {spec}; using the system default",
+            follows_default=True,
         )
 
     wanted = str(spec).strip().casefold()
@@ -167,6 +288,7 @@ def resolve(spec: Any) -> Choice:
             default_choice.index,
             default_choice.name,
             f"microphone {spec!r} is not connected; using the system default",
+            follows_default=True,
         )
     # Prefer the host API the default lives in - on Windows that is the one
     # whose names match what the user picked from the menu.
