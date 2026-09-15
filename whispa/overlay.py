@@ -147,10 +147,42 @@ class Overlay:
             # just be clickable and appear in alt-tab.
             log.debug("could not apply click-through window styles", exc_info=True)
 
+    def _pin_dpi_awareness(self) -> "int | None":
+        """Freeze the process's DPI mode, now that the window exists.
+
+        Windows lets a process choose its DPI awareness exactly once; the
+        first caller wins and every later call fails. whispa never asks, so
+        the pill is created in whatever mode the interpreter started in and
+        its geometry is worked out in that coordinate space. But
+        `uiautomation` - imported lazily by the learner a few seconds after
+        start - calls SetProcessDpiAwareness(per-monitor) at import time,
+        flipping the coordinate space of the whole process under this
+        already-placed window. Re-asserting the current value here spends the
+        one call, so the later one fails harmlessly and "90 px above the
+        bottom" keeps meaning the same thing for the life of the process.
+        uiautomation only reads text for whispa; it needs no DPI awareness.
+
+        Returns the mode that was pinned (0 unaware, 1 system, 2 per-monitor),
+        or None off Windows.
+        """
+        try:
+            import ctypes
+
+            shcore = ctypes.windll.shcore
+            current = ctypes.c_int()
+            if shcore.GetProcessDpiAwareness(None, ctypes.byref(current)) != 0:
+                return None
+            shcore.SetProcessDpiAwareness(current.value)
+            return current.value
+        except Exception:
+            log.debug("could not pin DPI awareness", exc_info=True)
+            return None
+
     def _build(self) -> None:
         import tkinter as tk
 
         self._root = tk.Tk()
+        dpi_mode = self._pin_dpi_awareness()
         self._root.withdraw()
         self._root.overrideredirect(True)
         self._root.attributes("-topmost", True)
@@ -164,6 +196,14 @@ class Overlay:
         x = (screen_w - self.WIDTH) // 2
         y = screen_h - self.HEIGHT - self.BOTTOM_MARGIN
         self._root.geometry(f"{self.WIDTH}x{self.HEIGHT}+{x}+{y}")
+        # One line so the log can answer "why is the pill over there?" -
+        # screen size and DPI mode are what decide it, and both are invisible
+        # from a screenshot.
+        log.info(
+            "pill at +%d+%d on a %dx%d screen (dpi mode %s)",
+            x, y, screen_w, screen_h,
+            {0: "unaware", 1: "system", 2: "per-monitor"}.get(dpi_mode, "unknown"),
+        )
 
         self._canvas = tk.Canvas(
             self._root,
